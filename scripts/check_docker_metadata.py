@@ -47,39 +47,42 @@ def _uv_required_version() -> str | None:
     return None
 
 
-def main() -> int:
-    errors: list[str] = []
-    uv_version = _uv_required_version()
-    if uv_version is None:
-        errors.append("uv.toml must define a valid required-version")
-    dockerfiles = {"Dockerfile": _read("Dockerfile")}
+def _check_dockerfile(errors: list[str], uv_version: str | None) -> None:
+    dockerfile = _read("Dockerfile")
+    _check_base_dockerfile_markers("Dockerfile", dockerfile, errors, uv_version)
+    _check_dockerfile_runtime(dockerfile, errors)
 
-    for path, content in dockerfiles.items():
-        required = [
-            f'io.modelcontextprotocol.server.name="{MCP_SERVER_NAME}"',
-            'org.opencontainers.image.source="https://github.com/oaslananka/kicad-mcp-pro"',
-            "ARG KICAD_MCP_VERSION",
-            "ARG VCS_REF",
-        ]
-        for marker in required:
-            if marker not in content:
-                errors.append(f"{path} is missing {marker}")
-        if "@sha256:" not in content:
-            errors.append(f"{path} must pin Docker base images by digest")
-        if uv_version is not None and f"ARG UV_VERSION={uv_version}" not in content:
-            errors.append(f"{path} must pin ARG UV_VERSION={uv_version}")
-        if "EXPOSE 3334" not in content:
-            errors.append(f"{path} must expose 3334")
-        if 'CMD ["--transport", "streamable-http"]' not in content:
-            errors.append(f"{path} must default to streamable HTTP")
-        if "ghcr.io/astral-sh/uv:${UV_VERSION}@sha256:" not in content:
-            errors.append(f"{path} must install uv from a digest-pinned image")
-        if "COPY --from=uv-bin /uv /usr/local/bin/uv" not in content:
-            errors.append(f"{path} must copy uv from the pinned uv image")
-        if "uv pip install --system --no-cache --require-hashes" not in content:
-            errors.append(f"{path} must install runtime dependencies with hash enforcement")
 
-    dockerfile = dockerfiles["Dockerfile"]
+def _check_base_dockerfile_markers(
+    path: str, content: str, errors: list[str], uv_version: str | None
+) -> None:
+
+    required = [
+        f'io.modelcontextprotocol.server.name="{MCP_SERVER_NAME}"',
+        'org.opencontainers.image.source="https://github.com/oaslananka/kicad-mcp-pro"',
+        "ARG KICAD_MCP_VERSION",
+        "ARG VCS_REF",
+    ]
+    for marker in required:
+        if marker not in content:
+            errors.append(f"{path} is missing {marker}")
+    if "@sha256:" not in content:
+        errors.append(f"{path} must pin Docker base images by digest")
+    if uv_version is not None and f"ARG UV_VERSION={uv_version}" not in content:
+        errors.append(f"{path} must pin ARG UV_VERSION={uv_version}")
+    if "EXPOSE 3334" not in content:
+        errors.append(f"{path} must expose 3334")
+    if 'CMD ["--transport", "streamable-http"]' not in content:
+        errors.append(f"{path} must default to streamable HTTP")
+    if "ghcr.io/astral-sh/uv:${UV_VERSION}@sha256:" not in content:
+        errors.append(f"{path} must install uv from a digest-pinned image")
+    if "COPY --from=uv-bin /uv /usr/local/bin/uv" not in content:
+        errors.append(f"{path} must copy uv from the pinned uv image")
+    if "uv pip install --system --no-cache --require-hashes" not in content:
+        errors.append(f"{path} must install runtime dependencies with hash enforcement")
+
+
+def _check_dockerfile_runtime(dockerfile: str, errors: list[str]) -> None:
     if "python:3.14.5-alpine3.22@sha256:" not in dockerfile:
         errors.append("Dockerfile must use the pinned Python 3.14.5 Alpine base")
     if "python:3.14.7-slim@sha256:" not in dockerfile:
@@ -97,6 +100,9 @@ def main() -> int:
         errors.append("Dockerfile must install the optional KiCad CLI APK package without cache")
     if "addgroup -S kicadmcp" not in dockerfile or "adduser -S -G kicadmcp" not in dockerfile:
         errors.append("Dockerfile must create the non-root runtime user with Alpine tools")
+
+
+def _check_compose(errors: list[str]) -> None:
     compose = _read("docker-compose.yml")
     if ":latest" in compose:
         errors.append("docker-compose.yml must not use :latest images")
@@ -107,6 +113,8 @@ def main() -> int:
     if not _has_digest_pinned_image(compose, "ghcr.io/freerouting/freerouting"):
         errors.append("docker-compose.yml must pin the freerouting image by digest")
 
+
+def _check_publish_workflows(errors: list[str]) -> None:
     docker_workflow = _read_repo(".github/workflows/publish-mcp-registry.yml")
     if "type=raw,value=latest" in docker_workflow:
         errors.append("publish-mcp-registry.yml must not publish a mutable latest tag")
@@ -149,6 +157,8 @@ def main() -> int:
         if not _has_sha_pinned_action(container_workflow, action_path):
             errors.append(message)
 
+
+def _check_docker_docs(errors: list[str]) -> None:
     docs_to_scan = [
         PACKAGE_ROOT / "docs" / "install" / "docker.md",
         PACKAGE_ROOT / "docs" / "deployment" / "docker.md",
@@ -178,6 +188,16 @@ def main() -> int:
     if "read_only: true" not in compose_example:
         errors.append("examples/mcp-docker/docker-compose.yml must mount projects read-only")
 
+
+def main() -> int:
+    errors: list[str] = []
+    uv_version = _uv_required_version()
+    if uv_version is None:
+        errors.append("uv.toml must define a valid required-version")
+    _check_dockerfile(errors, uv_version)
+    _check_compose(errors)
+    _check_publish_workflows(errors)
+    _check_docker_docs(errors)
     if errors:
         for error in errors:
             print(error, file=sys.stderr)
