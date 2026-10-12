@@ -1,6 +1,6 @@
 """Mirror canonical Agent Skills into host-discovery paths without semantic drift.
 
-Use `--write` for deliberate refresh; CI uses `--check` and never rewrites files.
+Use --write for deliberate refresh; CI uses --check and never rewrites files.
 Only the seven enumerated public KiCad skills are synchronized. Host-specific
 skills, such as OpenCode's repo-repair skill, remain independently owned.
 """
@@ -30,39 +30,75 @@ SKILLS = (
 )
 
 
+def _reject_linked_path(path: Path) -> None:
+    """Never read/write through linked paths within the owned repository."""
+    current = path
+    while current != ROOT:
+        if current.is_symlink():
+            raise ValueError(f"Skill path symlink not permitted: {current}")
+        parent = current.parent
+        if parent == current:
+            raise ValueError(f"Skill path outside repository: {path}")
+        current = parent
+
+
+def _canonical_skill_files(name: str) -> list[Path]:
+    origin = CANONICAL / name
+    _reject_linked_path(origin)
+    skill_file = origin / "SKILL.md"
+    if not skill_file.is_file() or skill_file.is_symlink():
+        raise ValueError(f"Missing or linked canonical skill: {skill_file}")
+    content = skill_file.read_text(encoding="utf-8")
+    if not content.startswith("---\n"):
+        raise ValueError(f"Skill YAML frontmatter missing: {skill_file}")
+    _, yaml_part, _ = content.split("---", 2)
+    metadata = yaml.safe_load(yaml_part)
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("name") != name
+        or not isinstance(metadata.get("description"), str)
+        or not metadata["description"].strip()
+    ):
+        raise ValueError(f"Invalid skill identity/description: {skill_file}")
+    paths = sorted(origin.rglob("*"))
+    for source in paths:
+        _reject_linked_path(source)
+    return [source for source in paths if source.is_file()]
+
+
 def expected_skill_files() -> dict[Path, bytes]:
     generated: dict[Path, bytes] = {}
     for name in SKILLS:
         origin = CANONICAL / name
-        skill_file = origin / "SKILL.md"
-        if not skill_file.is_file() or skill_file.is_symlink():
-            raise ValueError(f"Missing or linked canonical skill: {skill_file}")
-        content = skill_file.read_text(encoding="utf-8")
-        if not content.startswith("---\n"):
-            raise ValueError(f"Skill YAML frontmatter missing: {skill_file}")
-        _, yaml_part, _ = content.split("---", 2)
-        metadata = yaml.safe_load(yaml_part)
-        if (
-            not isinstance(metadata, dict)
-            or metadata.get("name") != name
-            or not isinstance(metadata.get("description"), str)
-            or not metadata["description"].strip()
-        ):
-            raise ValueError(f"Invalid skill identity/description: {skill_file}")
-        files = sorted(p for p in origin.rglob("*") if p.is_file())
-        for source in files:
-            if source.is_symlink():
-                raise ValueError(f"Skill source symlink not permitted: {source}")
+        for source in _canonical_skill_files(name):
             relative = source.relative_to(origin)
             if any(part.startswith(".") or part == "__pycache__" for part in relative.parts):
                 continue
+            content = source.read_bytes()
             for target_root in HOST_ROOTS:
-                generated[target_root / name / relative] = source.read_bytes()
+                generated[target_root / name / relative] = content
     return generated
+
+
+def _preflight_mirror_paths(expected: dict[Path, bytes]) -> None:
+    """Fail closed on linked ancestor paths before updating any generated skill."""
+    for root in HOST_ROOTS:
+        _reject_linked_path(root)
+        for name in SKILLS:
+            _reject_linked_path(root / name)
+    for target in expected:
+        _reject_linked_path(target)
+    for root in HOST_ROOTS:
+        for name in SKILLS:
+            directory = root / name
+            if directory.exists():
+                for item in directory.rglob("*"):
+                    _reject_linked_path(item)
 
 
 def run(*, write: bool) -> int:
     expected = expected_skill_files()
+    _preflight_mirror_paths(expected)
     discrepancies: list[str] = []
     for target, content in expected.items():
         if target.is_symlink():
