@@ -5995,7 +5995,7 @@ def _transactional_write_to_schematic_file(
         if updated != current:
             try:
                 _record_schematic_visual_diff(sch_file, current, updated)
-            except (OSError, ValueError, json.JSONDecodeError, AttributeError) as exc:
+            except (OSError, ValueError, AttributeError) as exc:
                 logger.warning(
                     "schematic_visual_diff_record_failed",
                     path=str(sch_file),
@@ -6514,7 +6514,7 @@ def _population_records(
 
 def _parse_wire_block(block: str) -> dict[str, Any] | None:
     pts_match = re.search(
-        (r"\(pts\s+\(xy\s+([-\d.]+)\s+([-\d.]+)\)\s+" r"\(xy\s+([-\d.]+)\s+([-\d.]+)\)\s*\)"),
+        (r"\(pts\s+\(xy\s+([-\d.]+)\s+([-\d.]+)\)\s+\(xy\s+([-\d.]+)\s+([-\d.]+)\)\s*\)"),
         block,
     )
     if pts_match is None:
