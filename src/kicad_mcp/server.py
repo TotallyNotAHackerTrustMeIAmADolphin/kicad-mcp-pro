@@ -140,6 +140,9 @@ try:
 except ImportError:
     HAS_TRAY = False
 
+# Shared user-facing values; preserve spelling and case across CLI and reports.
+_HELP_JSON_OUTPUT = "Emit machine-readable JSON."
+
 logger = structlog.get_logger(__name__)
 app = typer.Typer(help=localize(SERVER_DESCRIPTION))
 tools_app = typer.Typer(help=localize("Inspect registered MCP tools."))
@@ -2601,9 +2604,7 @@ def _strict_diagnostic_command(
 
 @app.command()
 def health(
-    json_output: bool = typer.Option(
-        False, "--json", help=option_help("Emit machine-readable JSON.")
-    ),
+    json_output: bool = typer.Option(False, "--json", help=option_help(_HELP_JSON_OUTPUT)),
 ) -> None:
     """Report fast package and configuration health without requiring KiCad IPC."""
     _diagnostic_command(build_health_report, as_json=json_output)
@@ -2611,9 +2612,7 @@ def health(
 
 @app.command()
 def doctor(
-    json_output: bool = typer.Option(
-        False, "--json", help=option_help("Emit machine-readable JSON.")
-    ),
+    json_output: bool = typer.Option(False, "--json", help=option_help(_HELP_JSON_OUTPUT)),
     bundle: Path | None = DOCTOR_BUNDLE_OPTION,
     strict: bool = typer.Option(
         False,
@@ -2871,9 +2870,7 @@ def init(
 
 @app.command()
 def status(
-    json_output: bool = typer.Option(
-        False, "--json", help=option_help("Emit machine-readable JSON.")
-    ),
+    json_output: bool = typer.Option(False, "--json", help=option_help(_HELP_JSON_OUTPUT)),
 ) -> None:
     """Display a human-readable status dashboard."""
 
@@ -3114,7 +3111,7 @@ def _tool_payload(tool: mcp_types.Tool) -> dict[str, object]:
 
 @tools_app.command("list")
 def list_tools_command(
-    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    json_output: bool = typer.Option(False, "--json", help=_HELP_JSON_OUTPUT),
     profile: str | None = typer.Option(
         None, help=f"Server profile: {', '.join(available_profiles())}"
     ),
@@ -3158,7 +3155,7 @@ def list_tools_command(
 
 @app.command("capabilities")
 def capabilities_command(
-    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    json_output: bool = typer.Option(False, "--json", help=_HELP_JSON_OUTPUT),
 ) -> None:
     """List registered capability metadata."""
     payload = all_protocol_metadata()
@@ -3212,7 +3209,7 @@ def generate_mcp_config_command(
 
 @app.command("version")
 def version_command(
-    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
+    json_output: bool = typer.Option(False, "--json", help=_HELP_JSON_OUTPUT),
 ) -> None:
     """Print package version information."""
     with contextlib.redirect_stdout(io.StringIO()):
