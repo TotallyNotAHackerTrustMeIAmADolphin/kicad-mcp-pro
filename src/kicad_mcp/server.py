@@ -1659,7 +1659,7 @@ def _json_rpc_protocol_version(body: bytes) -> str | None:
     """Read modern per-request metadata for version diagnostics only."""
     try:
         payload = json.loads(body.decode("utf-8"))
-    except (UnicodeError, ValueError):
+    except ValueError:
         return None
     if not isinstance(payload, dict):
         return None
