@@ -142,6 +142,8 @@ except ImportError:
 
 # Shared user-facing values; preserve spelling and case across CLI and reports.
 _HELP_JSON_OUTPUT = "Emit machine-readable JSON."
+_HTTP_RESPONSE_START = "http.response.start"
+_NOT_FOUND_LITERAL = "not found"
 _TOOL_ERROR_EVENT_NAME = "mcp.tool_error"
 
 logger = structlog.get_logger(__name__)
@@ -394,13 +396,14 @@ def _tool_error_code(message: str, *, tool_name: str = "") -> str:
         return "TOOL_VALIDATION_ERROR"
     if "permission" in lowered or "denied" in lowered or "not allowed" in lowered:
         return "PERMISSION_DENIED"
-    if "not found" in lowered:
+    missing_or_not_found = _NOT_FOUND_LITERAL in lowered or "missing" in lowered
+    if _NOT_FOUND_LITERAL in lowered:
         return "NOT_FOUND"
-    if "symbol" in lowered and ("not found" in lowered or "missing" in lowered):
+    if "symbol" in lowered and missing_or_not_found:
         return "SYMBOL_NOT_FOUND"
-    if "footprint" in lowered and ("not found" in lowered or "missing" in lowered):
+    if "footprint" in lowered and missing_or_not_found:
         return "FOOTPRINT_NOT_FOUND"
-    if "net" in lowered and ("not found" in lowered or "missing" in lowered):
+    if "net" in lowered and missing_or_not_found:
         return "NET_NOT_FOUND"
     return "TOOL_EXECUTION_FAILED"
 
@@ -463,21 +466,22 @@ def _tool_error_hint(message: str) -> str:
             "Use --mode=write, --mode=manufacturing,\n"
             "or --mode=experimental with appropriate access."
         )
-    if "symbol" in lowered and ("not found" in lowered or "missing" in lowered):
+    missing_or_not_found = _NOT_FOUND_LITERAL in lowered or "missing" in lowered
+    if "symbol" in lowered and missing_or_not_found:
         return (
             "Symbol not found. Check the library name and symbol name,\n"
             "or run 'kicad-mcp-pro tools list'."
         )
-    if "footprint" in lowered and ("not found" in lowered or "missing" in lowered):
+    if "footprint" in lowered and missing_or_not_found:
         return (
             "Footprint not found. Check the library name and footprint name,\n"
             "or run 'kicad-mcp-pro tools list'."
         )
-    if "net" in lowered and ("not found" in lowered or "missing" in lowered):
+    if "net" in lowered and missing_or_not_found:
         return (
             "Net not found. Verify the net name exists in the schematic, or check kicad_get_nets()."
         )
-    if "not found" in lowered or ("symbol" in lowered and "missing" in lowered):
+    if _NOT_FOUND_LITERAL in lowered or ("symbol" in lowered and "missing" in lowered):
         return "The requested resource was not found. Verify the name, identifier, or library path."
     return (
         "Inspect the structured error and retry after correcting the request or project state. "
@@ -1389,7 +1393,7 @@ class _StreamableHttpContractMiddleware:
 
             async def delete_request_send(message: Message) -> None:
                 nonlocal delete_response_status
-                if message["type"] == "http.response.start":
+                if message["type"] == _HTTP_RESPONSE_START:
                     status_value = message.get("status")
                     delete_response_status = status_value if isinstance(status_value, int) else None
                 await send(message)
@@ -1426,7 +1430,7 @@ class _StreamableHttpContractMiddleware:
 
         async def post_request_send(message: Message) -> None:
             nonlocal post_response_status
-            if message["type"] == "http.response.start":
+            if message["type"] == _HTTP_RESPONSE_START:
                 status_value = message.get("status")
                 post_response_status = status_value if isinstance(status_value, int) else None
             await original_send(message)
@@ -1527,7 +1531,7 @@ class _StreamableHttpContractMiddleware:
                 return
 
         async def send_wrapper(message: Message) -> None:
-            if message["type"] == "http.response.start":
+            if message["type"] == _HTTP_RESPONSE_START:
                 response_session_id = _message_header(message, "mcp-session-id")
                 if response_session_id:
                     self._remember_session(response_session_id)

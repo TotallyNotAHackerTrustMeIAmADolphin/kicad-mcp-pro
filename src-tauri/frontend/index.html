@@ -161,7 +161,7 @@
       </div>
     </div>
 
-    <script>
+    <script type="module">
       const DASHBOARD_URL = 'http://127.0.0.1:3334/ui';
       const HEALTH_URL = 'http://127.0.0.1:3334/api/health';
 
@@ -316,8 +316,10 @@
         setTimeout(checkServer, RETRY_INTERVAL_MS);
       }
 
+      window.handleRestartServer = handleRestartServer;
+
       // Start checking
-      checkServer();
+      await checkServer();
     </script>
   </body>
 </html>

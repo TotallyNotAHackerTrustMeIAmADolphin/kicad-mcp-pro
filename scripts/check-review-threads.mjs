@@ -215,15 +215,16 @@ function summarizeThread(thread) {
   const blocking =
     unresolvedCurrent &&
     (humanComments.length > 0 || actionableBotComments.length > 0);
-  const reason = thread.isResolved
-    ? "resolved"
-    : thread.isOutdated
-      ? "outdated"
-      : humanComments.length > 0
-        ? "human-review"
-        : actionableBotComments.length > 0
-          ? "actionable-bot"
-          : "informational-bot";
+  let reason = "informational-bot";
+  if (thread.isResolved) {
+    reason = "resolved";
+  } else if (thread.isOutdated) {
+    reason = "outdated";
+  } else if (humanComments.length > 0) {
+    reason = "human-review";
+  } else if (actionableBotComments.length > 0) {
+    reason = "actionable-bot";
+  }
 
   return {
     id: thread.id,
@@ -336,7 +337,9 @@ async function main() {
   process.exitCode = args.failOnBlocked && summary.blocked ? 1 : 0;
 }
 
-main().catch((error) => {
-  console.error(`check-review-threads: ${error.message}`);
+try {
+  await main();
+} catch {
+  console.error("check-review-threads: review-thread check failed");
   process.exitCode = 2;
-});
+}
