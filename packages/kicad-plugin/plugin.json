@@ -1,0 +1,22 @@
+{
+  "$schema": "https://go.kicad.org/api/schemas/v1",
+  "identifier": "com.github.oaslananka.kicad-mcp-pro",
+  "name": "KiCad MCP Pro Companion",
+  "description": "Review the active PCB with KiCad MCP Pro from a KiCad 10 toolbar action.",
+  "runtime": {
+    "type": "python",
+    "min_version": "3.9"
+  },
+  "actions": [
+    {
+      "identifier": "open-companion",
+      "name": "Open MCP Pro Companion",
+      "description": "Show the active PCB and the KiCad MCP Pro connection in a companion window.",
+      "show-button": true,
+      "scopes": ["pcb"],
+      "entrypoint": "companion.py",
+      "icons-light": ["icon.png"],
+      "icons-dark": ["icon.png"]
+    }
+  ]
+}

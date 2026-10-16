@@ -108,6 +108,13 @@ uvx kicad-mcp-pro dashboard --open
 uvx kicad-mcp-pro --transport streamable-http --port 3334
 ```
 
+### KiCad PCB Editor Companion (development preview)
+
+The existing KiCad PCM Companion is being upgraded to a KiCad 10 IPC toolbar
+plugin in [packages/kicad-plugin/](packages/kicad-plugin/). It reads the active
+PCB and links to the existing local dashboard. The IPC upgrade is read-only;
+live desktop acceptance and release are pending.
+
 ### Web Dashboard
 
 ```bash

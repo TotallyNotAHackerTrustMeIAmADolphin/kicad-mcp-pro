@@ -666,6 +666,78 @@ async def test_open_pcb_editor_uses_live_board_context_and_project_switches(
 
         live_outputs = await _wait_for_live_context(server, artifacts, first_pcb)
         _write_json(artifacts / "live-context-summary.json", live_outputs)
+        if os.environ.get("KICAD_MCP_COMPANION_LIVE") == "1":
+            assert platform.system() == "Darwin", "Companion workflow probe is macOS-only"
+            # Fail closed if the probe is redirected away from our disposable CI paths.
+            runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve()
+            plugin_dir = Path(os.environ["KICAD_MCP_COMPANION_PLUGIN_DIR"]).resolve()
+            cache_root = Path(os.environ["KICAD_CACHE_HOME"]).resolve()
+            assert cache_root == runner_temp / "kicad-107-cache"
+            expected_plugin = runner_temp / "kicad-107-documents/KiCad/10.0/plugins/kicad-mcp-pro"
+            assert plugin_dir == expected_plugin
+            plugin_id = "com.github.oaslananka.kicad-mcp-pro"
+            candidates = (
+                cache_root
+                / "KiCad"
+                / "10.0"
+                / "python-environments"
+                / plugin_id
+                / "bin"
+                / "python",
+            )
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                if any(candidate.is_file() for candidate in candidates):
+                    break
+                await asyncio.sleep(3)
+            python = next((candidate for candidate in candidates if candidate.is_file()), None)
+            if python is None:
+                default_cache = Path.home() / "Library/Caches/KiCad/10.0/python-environments"
+                default_docs = Path.home() / "Documents/KiCad/10.0/plugins"
+                pytest.fail(
+                    "KiCad did not provision the Companion plugin environment; "
+                    f"fixtureManifest={(plugin_dir / 'plugin.json').is_file()}, "
+                    f"isolatedCacheExists={cache_root.is_dir()}, "
+                    f"isolatedEnvRoot={(cache_root / 'KiCad/10.0/python-environments').is_dir()}, "
+                    f"defaultEnvExists={(default_cache / plugin_id).exists()}, "
+                    f"defaultPluginExists={(default_docs / 'kicad-mcp-pro/plugin.json').exists()}"
+                )
+            # Fixed source and KiCad-owned executable from an isolated runner cache.
+            # All arguments are argv-only (never shell-interpreted); paths are
+            # constrained above. Codacy's generic command-injection detectors
+            # cannot model this bounded, trusted CI-only launch.
+            probe = await asyncio.create_subprocess_exec(  # nosemgrep
+                str(python),
+                str(REPO_ROOT / "tests/gui/native_companion_live_probe.py"),
+                str(plugin_dir),
+                Path(env["KICAD_MCP_PCB_FILE"]).name,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, _stderr = await asyncio.wait_for(probe.communicate(), timeout=55)
+            except TimeoutError:
+                probe.kill()
+                await probe.wait()
+                pytest.fail("Companion wx/IPC probe timed out")
+            diagnostics = next(
+                (
+                    line
+                    for line in stdout.decode("utf-8", errors="replace").splitlines()
+                    if line.startswith("MACOS_COMPANION_PROBE ") and len(line) < 180
+                ),
+                "probe did not emit bounded diagnostics",
+            )
+            assert probe.returncode == 0, (
+                f"Companion wx/IPC probe exited unsuccessfully: {diagnostics}"
+            )
+            assert b"MACOS_COMPANION_LIVE_PASS" in stdout, (
+                f"Companion wx/IPC probe did not confirm live acceptance: {diagnostics}"
+            )
+            _write_json(
+                artifacts / "companion-acceptance.json",
+                {"pluginManagedPython": True, "wxWindowAndLiveBoard": True},
+            )
 
         tracks = live_outputs["pcb_get_tracks"]["text"]
         footprints = live_outputs["pcb_get_footprints"]["text"]

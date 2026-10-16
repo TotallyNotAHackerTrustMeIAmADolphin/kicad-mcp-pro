@@ -19,7 +19,11 @@ EXPECTED_MEMBERS = {
     "plugins/__init__.py",
     "plugins/compatibility.json",
     "plugins/context.py",
-    "plugins/kicad_mcp_companion.py",
+    "plugins/plugin.json",
+    "plugins/requirements.txt",
+    "plugins/companion.py",
+    "plugins/companion_core.py",
+    "plugins/icon.png",
     "resources/icon.png",
 }
 
@@ -51,12 +55,19 @@ def test_pcm_archive_has_exact_reviewed_structure_and_metadata(tmp_path: Path) -
         assert set(archive.namelist()) == EXPECTED_MEMBERS
         metadata = json.loads(archive.read("metadata.json"))
         compatibility = json.loads(archive.read("plugins/compatibility.json"))
+        manifest = json.loads(archive.read("plugins/plugin.json"))
         icon = archive.read("resources/icon.png")
         for info in archive.infolist():
             assert not info.filename.startswith(("/", "\\"))
             assert ".." not in Path(info.filename).parts
             assert (info.external_attr >> 16) & 0o170000 != 0o120000
 
+    assert manifest["identifier"] == metadata["identifier"]
+    assert manifest["runtime"]["type"] == "python"
+    assert manifest["runtime"]["min_version"] == "3.9"
+    assert manifest["actions"][0]["scopes"] == ["pcb"]
+    assert manifest["actions"][0]["entrypoint"] == "companion.py"
+    assert manifest["actions"][0]["show-button"] is True
     assert metadata["$schema"] == "https://go.kicad.org/pcm/schemas/v2"
     assert metadata["identifier"] == "com.github.oaslananka.kicad-mcp-pro"
     assert metadata["type"] == "plugin"
@@ -67,9 +78,9 @@ def test_pcm_archive_has_exact_reviewed_structure_and_metadata(tmp_path: Path) -
     version = metadata["versions"][0]
     assert version == {
         "version": _project_version(),
-        "status": "stable",
+        "status": "development",
         "kicad_version": "10.0",
-        "runtime": "swig",
+        "runtime": "ipc",
     }
     assert not any(key.startswith("download_") for key in version)
     assert compatibility["schema_version"] == "kicad-mcp-companion-compat.v1"
@@ -79,7 +90,7 @@ def test_pcm_archive_has_exact_reviewed_structure_and_metadata(tmp_path: Path) -
         "minimum": f"{major}.{minor}.0",
         "maximum_exclusive": f"{major}.{minor + 1}.0",
     }
-    assert compatibility["kicad"] == {"minimum": "10.0", "runtime": "swig"}
+    assert compatibility["kicad"] == {"minimum": "10.0", "runtime": "ipc"}
     assert icon == (ROOT / "docs" / "assets" / "icon-64.png").read_bytes()
 
 
@@ -100,7 +111,7 @@ def test_pcm_build_is_byte_reproducible_and_evidence_matches(tmp_path: Path) -> 
         "sha256": digest,
         "download_size": first.artifact.stat().st_size,
         "install_size": first.install_size,
-        "runtime": "swig",
+        "runtime": "ipc",
         "minimum_kicad_version": "10.0",
     }
     assert first.checksums.read_text(encoding="utf-8") == f"{digest}  {first.artifact.name}\n"

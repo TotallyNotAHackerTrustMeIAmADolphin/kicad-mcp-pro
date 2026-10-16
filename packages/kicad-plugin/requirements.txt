@@ -1,0 +1,2 @@
+# KiCad's IPC Python runtime installs this isolated dependency.
+kicad-python>=0.8,<1.0

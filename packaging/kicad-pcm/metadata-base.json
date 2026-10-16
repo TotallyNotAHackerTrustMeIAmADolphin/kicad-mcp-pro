@@ -1,8 +1,8 @@
 {
   "$schema": "https://go.kicad.org/pcm/schemas/v2",
   "name": "KiCad MCP Pro",
-  "description": "Connect KiCad to the canonical KiCad MCP Pro backend with local context and safe approvals.",
-  "description_full": "KiCad MCP Pro companion integration for the KiCad Plugin and Content Manager. The companion publishes the active board/project context to a separately installed, loopback-only KiCad MCP Pro backend and preserves the backend's existing authentication and write-approval boundaries. The backend remains available through uvx, PyPI, desktop, Docker, and other supported distribution paths.",
+  "description": "Open KiCad MCP Pro tools from a KiCad 10 PCB Editor IPC companion.",
+  "description_full": "Native KiCad 10 IPC companion for the PCB Editor. A lightweight read-only desktop window displays the active board, selected item count and local KiCad MCP Pro status. The existing separately installed backend provides the engineering tools and retains authentication and approval boundaries. This package requires KiCad 10 and a graphical Python/Tk environment; first IPC release is under development.",
   "identifier": "com.github.oaslananka.kicad-mcp-pro",
   "type": "plugin",
   "author": {

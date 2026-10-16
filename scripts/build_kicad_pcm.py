@@ -14,10 +14,11 @@ from typing import Any, NamedTuple, cast
 PACKAGE_IDENTIFIER = "com.github.oaslananka.kicad-mcp-pro"
 PCM_SCHEMA = "https://go.kicad.org/pcm/schemas/v2"
 MINIMUM_KICAD_VERSION = "10.0"
-PLUGIN_RUNTIME = "swig"
+PLUGIN_RUNTIME = "ipc"
 COMPATIBILITY_SCHEMA = "kicad-mcp-companion-compat.v1"
 EVIDENCE_SCHEMA = "kicad-pcm-release-evidence.v1"
 METADATA_MEMBER = "metadata.json"
+PLUGIN_MANIFEST_MEMBER = "plugins/plugin.json"
 ICON_MEMBER = "resources/icon.png"
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _REGULAR_FILE_MODE = 0o100644
@@ -76,7 +77,7 @@ def _metadata(root: Path, version: str) -> dict[str, Any]:
     metadata["versions"] = [
         {
             "version": version,
-            "status": "stable",
+            "status": "development",
             "kicad_version": MINIMUM_KICAD_VERSION,
             "runtime": PLUGIN_RUNTIME,
         }
@@ -102,10 +103,21 @@ def _package_members(root: Path, version: str) -> dict[str, bytes]:
             json.dumps(_compatibility(version), indent=2) + "\n"
         ).encode(),
         "plugins/context.py": (plugin_root / "context.py").read_bytes(),
-        "plugins/kicad_mcp_companion.py": (plugin_root / "kicad_mcp_companion.py").read_bytes(),
+        PLUGIN_MANIFEST_MEMBER: (plugin_root / "plugin.json").read_bytes(),
+        "plugins/requirements.txt": (plugin_root / "requirements.txt").read_bytes(),
+        "plugins/companion.py": (plugin_root / "companion.py").read_bytes(),
+        "plugins/companion_core.py": (plugin_root / "companion_core.py").read_bytes(),
+        "plugins/icon.png": (plugin_root / "icon.png").read_bytes(),
         ICON_MEMBER: (root / "docs" / "assets" / "icon-64.png").read_bytes(),
     }
     _validate_icon(members[ICON_MEMBER])
+    manifest = json.loads(members[PLUGIN_MANIFEST_MEMBER])
+    if (
+        manifest.get("identifier") != PACKAGE_IDENTIFIER
+        or manifest.get("runtime", {}).get("type") != "python"
+        or manifest.get("actions", [{}])[0].get("entrypoint") != "companion.py"
+    ):
+        raise ValueError("KiCad IPC action manifest does not match the PCM contract")
     return members
 
 
@@ -188,7 +200,11 @@ def verify_pcm(artifact: Path, checksums: Path) -> None:
                 "plugins/__init__.py",
                 "plugins/compatibility.json",
                 "plugins/context.py",
-                "plugins/kicad_mcp_companion.py",
+                PLUGIN_MANIFEST_MEMBER,
+                "plugins/requirements.txt",
+                "plugins/companion.py",
+                "plugins/companion_core.py",
+                "plugins/icon.png",
                 ICON_MEMBER,
             }
         )
