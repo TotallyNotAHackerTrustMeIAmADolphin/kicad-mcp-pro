@@ -339,3 +339,59 @@ def test_deferred_build_registers_tools_on_first_discovery(sample_project: Path)
     assert server._lazy_registration_complete is True
     assert "kicad_get_version" in tool_names
     assert "export_bom" in tool_names
+
+
+def test_run_with_watch_without_watchfiles(monkeypatch: pytest.MonkeyPatch) -> None:
+    import kicad_mcp.server as srv
+
+    monkeypatch.setattr(srv, "watchfiles", None)
+    srv._run_with_watch()
+
+
+def test_run_with_watch_restarting_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import MagicMock
+
+    import kicad_mcp.server as srv
+
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: mock_proc)
+
+    class FakeWatchfiles:
+        @staticmethod
+        def watch(path: str):  # noqa: ANN205
+            yield [(1, "changed_file.py")]
+            return
+
+    monkeypatch.setattr(srv, "watchfiles", FakeWatchfiles)
+    srv._run_with_watch()
+    mock_proc.terminate.assert_called()
+
+
+def test_import_server_without_optional_watchfiles_and_tray(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing optional integrations must not leave unbound module globals."""
+    import builtins
+    import runpy
+
+    original_import = builtins.__import__
+
+    def reject_optional(name, module_globals=None, module_locals=None, fromlist=(), level=0):
+        if name == "watchfiles" or (
+            name == "tray"
+            and level == 1
+            and module_globals is not None
+            and module_globals.get("__package__") == "kicad_mcp"
+        ):
+            raise ImportError("Optional module intentionally unavailable")
+        return original_import(name, module_globals, module_locals, fromlist, level)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(builtins, "__import__", reject_optional)
+        namespace = runpy.run_module("kicad_mcp.server", run_name="kicad_mcp._optional_server_test")
+
+    assert namespace["HAS_WATCHFILES"] is False
+    assert namespace["watchfiles"] is None
+    assert namespace["HAS_TRAY"] is False
+    assert namespace["tray_main"] is None
