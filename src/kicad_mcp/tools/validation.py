@@ -13,9 +13,6 @@ from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-if TYPE_CHECKING:
-    from .design_intent_state import ProjectDesignIntent
-
 from mcp.server.mcpserver import MCPServer as FastMCP
 from pydantic import BaseModel, Field
 
@@ -55,7 +52,7 @@ from .metadata import headless_compatible
 from .schematic_transfer import _collect_schematic_components, _export_schematic_net_map
 
 if TYPE_CHECKING:
-    from .design_intent_state import ProjectDesignIntent
+    from .design_intent_state import DecouplingPairIntent, ProjectDesignIntent
 
 
 # Stable validation messages and gate labels shared across reports.
@@ -1747,6 +1744,24 @@ def _manhattan_mst_length(points: list[tuple[float, float]]) -> float:
     return total
 
 
+@dataclass(frozen=True)
+class _PlacementScoreInputs:
+    overlaps: list[str]
+    outside: list[str]
+    connector_edge_violations: list[str]
+    decoupling_distance_violations: list[str]
+    keepout_violations: list[str]
+    power_tree_violations: list[str]
+    sensor_cluster_violations: list[str]
+    analog_digital_violations: list[str]
+    warnings: list[str]
+    thermal_proximity_sum: float
+    critical_net_proxy_density: float
+    hs_grouping_violations: list[str]
+    mount_hole_violations: list[str]
+    connector_edge_spec_violations: list[str]
+
+
 class _PlacementEvaluator:
     """Evaluate PCB placement quality, design intent rules, and mechanical constraints."""
 
@@ -1773,9 +1788,45 @@ class _PlacementEvaluator:
         self.density_pct = round((self.footprint_area_mm2 / self.board_area_mm2) * 100.0, 2)
         self.warnings: list[str] = []
 
-    def _evaluate_geometry_and_overlaps(self) -> tuple[list[str], list[str], list[str]]:
+    def _is_outside_frame(self, x: float, y: float, w: float, h: float) -> bool:
+        half_w = w / 2.0
+        half_h = h / 2.0
+        return (
+            x - half_w < self.min_x
+            or x + half_w > self.max_x
+            or y - half_h < self.min_y
+            or y + half_h > self.max_y
+        )
+
+    def _collect_pair_overlaps(
+        self,
+        index: int,
+        left_ref: str,
+        left_box: tuple[float, float, float, float],
+        items: list[tuple[str, dict[str, Any]]],
+    ) -> list[str]:
         from .board_file import _placement_boxes_overlap
 
+        lx, ly, lw, lh = left_box
+        overlaps: list[str] = []
+        for right_ref, right_entry in items[index + 1 :]:
+            if right_entry["x_mm"] is None or right_entry["y_mm"] is None:
+                continue
+            if _placement_boxes_overlap(
+                lx,
+                ly,
+                lw,
+                lh,
+                float(right_entry["x_mm"]),
+                float(right_entry["y_mm"]),
+                float(right_entry["width_mm"]),
+                float(right_entry["height_mm"]),
+                0.0,
+            ):
+                overlaps.append(f"{left_ref}/{right_ref}")
+        return overlaps
+
+    def _evaluate_geometry_and_overlaps(self) -> tuple[list[str], list[str], list[str]]:
         missing_position = [
             reference
             for reference, entry in self.footprints.items()
@@ -1791,28 +1842,13 @@ class _PlacementEvaluator:
             left_y = float(left_entry["y_mm"])
             left_w = float(left_entry["width_mm"])
             left_h = float(left_entry["height_mm"])
-            if (
-                left_x - (left_w / 2) < self.min_x
-                or left_x + (left_w / 2) > self.max_x
-                or left_y - (left_h / 2) < self.min_y
-                or left_y + (left_h / 2) > self.max_y
-            ):
+            if self._is_outside_frame(left_x, left_y, left_w, left_h):
                 outside.append(left_ref)
-            for right_ref, right_entry in items[index + 1 :]:
-                if right_entry["x_mm"] is None or right_entry["y_mm"] is None:
-                    continue
-                if _placement_boxes_overlap(
-                    left_x,
-                    left_y,
-                    left_w,
-                    left_h,
-                    float(right_entry["x_mm"]),
-                    float(right_entry["y_mm"]),
-                    float(right_entry["width_mm"]),
-                    float(right_entry["height_mm"]),
-                    0.0,
-                ):
-                    overlaps.append(f"{left_ref}/{right_ref}")
+            overlaps.extend(
+                self._collect_pair_overlaps(
+                    index, left_ref, (left_x, left_y, left_w, left_h), items
+                )
+            )
         return missing_position, overlaps, outside
 
     def _evaluate_connectors(self) -> tuple[list[str], int]:
@@ -1836,6 +1872,37 @@ class _PlacementEvaluator:
                 )
         return connector_edge_violations, checked_connectors
 
+    def _evaluate_decoupling_pair(
+        self,
+        pair: DecouplingPairIntent,
+        ic_entry: dict[str, Any],
+    ) -> list[str]:
+        violations: list[str] = []
+        cap_distances: list[float] = []
+        missing_caps: list[str] = []
+        for cap_ref in pair.cap_refs:
+            cap_entry = self.footprints.get(cap_ref)
+            if cap_entry is None or cap_entry["x_mm"] is None or cap_entry["y_mm"] is None:
+                missing_caps.append(cap_ref)
+                continue
+            cap_distances.append(
+                math.hypot(
+                    float(ic_entry["x_mm"]) - float(cap_entry["x_mm"]),
+                    float(ic_entry["y_mm"]) - float(cap_entry["y_mm"]),
+                )
+            )
+        if missing_caps:
+            violations.append(
+                f"{pair.ic_ref}: missing or unresolved decoupling caps -> "
+                + ", ".join(missing_caps[:12])
+            )
+        if cap_distances and min(cap_distances) > pair.max_distance_mm:
+            violations.append(
+                f"{pair.ic_ref}: nearest decoupling cap is {min(cap_distances):.2f} mm away "
+                f"(limit {pair.max_distance_mm:.2f} mm)."
+            )
+        return violations
+
     def _evaluate_decoupling(self) -> tuple[list[str], int]:
         decoupling_distance_violations: list[str] = []
         checked_decoupling_pairs = 0
@@ -1852,29 +1919,7 @@ class _PlacementEvaluator:
                 )
                 continue
             checked_decoupling_pairs += 1
-            cap_distances: list[float] = []
-            missing_caps: list[str] = []
-            for cap_ref in pair.cap_refs:
-                cap_entry = self.footprints.get(cap_ref)
-                if cap_entry is None or cap_entry["x_mm"] is None or cap_entry["y_mm"] is None:
-                    missing_caps.append(cap_ref)
-                    continue
-                cap_distances.append(
-                    math.hypot(
-                        float(ic_entry["x_mm"]) - float(cap_entry["x_mm"]),
-                        float(ic_entry["y_mm"]) - float(cap_entry["y_mm"]),
-                    )
-                )
-            if missing_caps:
-                decoupling_distance_violations.append(
-                    f"{pair.ic_ref}: missing or unresolved decoupling caps -> "
-                    + ", ".join(missing_caps[:12])
-                )
-            if cap_distances and min(cap_distances) > pair.max_distance_mm:
-                decoupling_distance_violations.append(
-                    f"{pair.ic_ref}: nearest decoupling cap is {min(cap_distances):.2f} mm away "
-                    f"(limit {pair.max_distance_mm:.2f} mm)."
-                )
+            decoupling_distance_violations.extend(self._evaluate_decoupling_pair(pair, ic_entry))
         return decoupling_distance_violations, checked_decoupling_pairs
 
     def _evaluate_keepouts(self) -> tuple[list[str], int]:
@@ -1963,6 +2008,24 @@ class _PlacementEvaluator:
                 )
         return sensor_cluster_violations, checked_sensor_cluster_refs
 
+    def _find_nearest_mixed_gap(
+        self,
+        analog_refs: list[str],
+        digital_refs: list[str],
+    ) -> tuple[float, str, str] | None:
+        nearest_mixed_gap: tuple[float, str, str] | None = None
+        for analog_ref in analog_refs:
+            analog_entry = self.footprints[analog_ref]
+            for digital_ref in digital_refs:
+                digital_entry = self.footprints[digital_ref]
+                gap = _bbox_gap_mm(analog_entry, digital_entry)
+                if gap is None:
+                    continue
+                candidate = (gap, analog_ref, digital_ref)
+                if nearest_mixed_gap is None or candidate[0] < nearest_mixed_gap[0]:
+                    nearest_mixed_gap = candidate
+        return nearest_mixed_gap
+
     def _evaluate_analog_digital(self) -> tuple[list[str], int, int]:
         analog_digital_violations: list[str] = []
         analog_refs = [
@@ -1975,17 +2038,7 @@ class _PlacementEvaluator:
             for r in self.intent.digital_refs
             if r in self.footprints and _entry_center(self.footprints[r]) is not None
         ]
-        nearest_mixed_gap: tuple[float, str, str] | None = None
-        for analog_ref in analog_refs:
-            analog_entry = self.footprints[analog_ref]
-            for digital_ref in digital_refs:
-                digital_entry = self.footprints[digital_ref]
-                gap = _bbox_gap_mm(analog_entry, digital_entry)
-                if gap is None:
-                    continue
-                candidate = (gap, analog_ref, digital_ref)
-                if nearest_mixed_gap is None or candidate[0] < nearest_mixed_gap[0]:
-                    nearest_mixed_gap = candidate
+        nearest_mixed_gap = self._find_nearest_mixed_gap(analog_refs, digital_refs)
         if nearest_mixed_gap is not None:
             gap, analog_ref, digital_ref = nearest_mixed_gap
             msg = (
@@ -2097,6 +2150,15 @@ class _PlacementEvaluator:
             )
         return thermal_hotspot_refs, round(thermal_proximity_sum, 4)
 
+    def _interface_spread(self, valid_centers: list[tuple[float, float]]) -> float:
+        max_spread = 0.0
+        for idx_a, ca in enumerate(valid_centers):
+            for cb in valid_centers[idx_a + 1 :]:
+                d = math.hypot(ca[0] - cb[0], ca[1] - cb[1])
+                if d > max_spread:
+                    max_spread = d
+        return max_spread
+
     def _evaluate_high_speed(self) -> tuple[list[str], list[str], int]:
         hs_grouping_violations: list[str] = []
         return_path_warnings: list[str] = []
@@ -2110,12 +2172,7 @@ class _PlacementEvaluator:
             valid_centers = [c for c in centers if c is not None]
             if len(valid_centers) < 2:
                 continue
-            max_spread = 0.0
-            for idx_a, ca in enumerate(valid_centers):
-                for cb in valid_centers[idx_a + 1 :]:
-                    d = math.hypot(ca[0] - cb[0], ca[1] - cb[1])
-                    if d > max_spread:
-                        max_spread = d
+            max_spread = self._interface_spread(valid_centers)
             limit_hard = self.board_diagonal * 0.5
             limit_warn = self.board_diagonal * 0.3
             iface_label = f"{iface.kind} ({', '.join(present_refs[:4])})"
@@ -2181,39 +2238,22 @@ class _PlacementEvaluator:
     def _evaluate_mechanical(self) -> tuple[list[str], list[str]]:
         return self._evaluate_mount_holes(), self._evaluate_connector_edge_specs()
 
-    def _calculate_score(
-        self,
-        *,
-        overlaps: list[str],
-        outside: list[str],
-        connector_edge_violations: list[str],
-        decoupling_distance_violations: list[str],
-        keepout_violations: list[str],
-        power_tree_violations: list[str],
-        sensor_cluster_violations: list[str],
-        analog_digital_violations: list[str],
-        warnings: list[str],
-        thermal_proximity_sum: float,
-        critical_net_proxy_density: float,
-        hs_grouping_violations: list[str],
-        mount_hole_violations: list[str],
-        connector_edge_spec_violations: list[str],
-    ) -> int:
+    def _calculate_score(self, inputs: _PlacementScoreInputs) -> int:
         score = 100
-        score -= min(len(overlaps) * 20, 40)
-        score -= min(len(outside) * 20, 40)
-        score -= min(len(connector_edge_violations) * 15, 30)
-        score -= min(len(decoupling_distance_violations) * 15, 30)
-        score -= min(len(keepout_violations) * 15, 30)
-        score -= min(len(power_tree_violations) * 15, 30)
-        score -= min(len(sensor_cluster_violations) * 15, 30)
-        score -= min(len(analog_digital_violations) * 15, 30)
-        score -= min(len(warnings) * 5, 20)
-        score -= min(int(round(thermal_proximity_sum * 10.0)), 10)
-        score -= min(int(critical_net_proxy_density // 20), 10)
-        score -= min(len(hs_grouping_violations) * 10, 20)
-        score -= min(len(mount_hole_violations) * 10, 20)
-        score -= min(len(connector_edge_spec_violations) * 10, 20)
+        score -= min(len(inputs.overlaps) * 20, 40)
+        score -= min(len(inputs.outside) * 20, 40)
+        score -= min(len(inputs.connector_edge_violations) * 15, 30)
+        score -= min(len(inputs.decoupling_distance_violations) * 15, 30)
+        score -= min(len(inputs.keepout_violations) * 15, 30)
+        score -= min(len(inputs.power_tree_violations) * 15, 30)
+        score -= min(len(inputs.sensor_cluster_violations) * 15, 30)
+        score -= min(len(inputs.analog_digital_violations) * 15, 30)
+        score -= min(len(inputs.warnings) * 5, 20)
+        score -= min(int(round(inputs.thermal_proximity_sum * 10.0)), 10)
+        score -= min(int(inputs.critical_net_proxy_density // 20), 10)
+        score -= min(len(inputs.hs_grouping_violations) * 10, 20)
+        score -= min(len(inputs.mount_hole_violations) * 10, 20)
+        score -= min(len(inputs.connector_edge_spec_violations) * 10, 20)
         return max(score, 0)
 
     def evaluate(self) -> PlacementAnalysis:
@@ -2254,20 +2294,22 @@ class _PlacementEvaluator:
         warnings.extend(return_path_warnings)
 
         score = self._calculate_score(
-            overlaps=overlaps,
-            outside=outside,
-            connector_edge_violations=connector_edge_violations,
-            decoupling_distance_violations=decoupling_distance_violations,
-            keepout_violations=keepout_violations,
-            power_tree_violations=power_tree_violations,
-            sensor_cluster_violations=sensor_cluster_violations,
-            analog_digital_violations=analog_digital_violations,
-            warnings=warnings,
-            thermal_proximity_sum=thermal_proximity_sum,
-            critical_net_proxy_density=critical_net_proxy_density,
-            hs_grouping_violations=hs_grouping_violations,
-            mount_hole_violations=mount_hole_violations,
-            connector_edge_spec_violations=connector_edge_spec_violations,
+            _PlacementScoreInputs(
+                overlaps=overlaps,
+                outside=outside,
+                connector_edge_violations=connector_edge_violations,
+                decoupling_distance_violations=decoupling_distance_violations,
+                keepout_violations=keepout_violations,
+                power_tree_violations=power_tree_violations,
+                sensor_cluster_violations=sensor_cluster_violations,
+                analog_digital_violations=analog_digital_violations,
+                warnings=warnings,
+                thermal_proximity_sum=thermal_proximity_sum,
+                critical_net_proxy_density=critical_net_proxy_density,
+                hs_grouping_violations=hs_grouping_violations,
+                mount_hole_violations=mount_hole_violations,
+                connector_edge_spec_violations=connector_edge_spec_violations,
+            )
         )
 
         return PlacementAnalysis(
