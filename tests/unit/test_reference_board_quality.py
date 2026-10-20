@@ -574,3 +574,74 @@ def test_quality_contract_identifiers_preserve_exact_native_evidence_boundary(
     else:
         with pytest.raises(ValidationError):
             QualityRuleResult(id=identifier, type="artifact", status="pass", reason_code="matched")
+
+
+def test_reference_board_quality_loader_error_and_eval_branches(tmp_path: Path) -> None:
+    from kicad_mcp.evals.reference_board_quality import (
+        PcbFootprintRule,
+        SchematicComponentRule,
+        _evaluate_single_quality_rule,
+        _load_attempt_board_text,
+        _load_attempt_circuit,
+    )
+
+    attempt_dir = tmp_path / "attempt"
+    attempt_dir.mkdir()
+    bad_sch = attempt_dir / "schematic.kicad_sch"
+    bad_sch.write_text("invalid (kicad_sch syntax", encoding="utf-8")
+
+    sch_rule = SchematicComponentRule(
+        id="c1", type="schematic_component", reference="R1", allowed_lib_ids=["Device:R"]
+    )
+    # 1. Error in parse_schematic -> None
+    circuit = _load_attempt_circuit(attempt_dir, (sch_rule,))
+    assert circuit is None
+
+    # 2. _evaluate_single_quality_rule with circuit=None -> evidence_missing
+    res = _evaluate_single_quality_rule(sch_rule, None, None, None, attempt_dir)  # type: ignore[arg-type]
+    assert res.status == "fail"
+    assert res.reason_code == "evidence_missing"
+
+    from kicad_mcp.ir.from_kicad import parse_schematic
+
+    demo_sch = (
+        Path(__file__).parents[1]
+        / "fixtures/benchmark_projects/fail_sismosmart_like_label_only/demo.kicad_sch"
+    )
+    valid_circuit = parse_schematic(demo_sch, load_pin_metadata=False)
+    res_sch_pass = _evaluate_single_quality_rule(
+        SchematicComponentRule(
+            id="u1",
+            type="schematic_component",
+            reference="U1",
+            allowed_lib_ids=("RF_Module:ESP32-S3-WROOM-1",),
+        ),
+        valid_circuit,
+        None,
+        None,  # type: ignore[arg-type]
+        attempt_dir,
+    )
+    assert res_sch_pass.status == "pass"
+
+    # 3. PcbFootprintRule with board_text=None -> evidence_missing
+    pcb_rule = PcbFootprintRule(
+        id="p1", type="pcb_footprint", reference="R1", allowed_footprints=["Resistor_SMD:R_0603"]
+    )
+    res_pcb = _evaluate_single_quality_rule(pcb_rule, None, None, None, attempt_dir)  # type: ignore[arg-type]
+    assert res_pcb.status == "fail"
+    assert res_pcb.reason_code == "evidence_missing"
+
+    board_text = '(footprint "Resistor_SMD:R_0603" (at 0 0) (property "Reference" "R1"))'
+    res_pcb_pass = _evaluate_single_quality_rule(
+        pcb_rule,
+        None,
+        board_text,
+        None,
+        attempt_dir,  # type: ignore[arg-type]
+    )
+    assert res_pcb_pass.status == "pass"
+
+    # 4. _load_attempt_board_text with read failure (invalid utf-8)
+    bad_board = attempt_dir / "board.kicad_pcb"
+    bad_board.write_bytes(b"\xff\xfe\x00\x00")
+    assert _load_attempt_board_text(attempt_dir, (pcb_rule,)) is None

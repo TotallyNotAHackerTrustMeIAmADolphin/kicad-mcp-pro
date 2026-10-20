@@ -1652,29 +1652,13 @@ def _next_free_block(
             col, row = 0, row + 1
 
 
-def _apply_netlist_auto_layout(
-    symbols: list[dict[str, Any]],
-    power_symbols: list[dict[str, Any]],
-    labels: list[dict[str, Any]],
-    nets: list[dict[str, Any]],
-    *,
-    paper: str = "A4",
-    max_paper: str | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
-    laid_out_symbols = [dict(item) for item in symbols]
-    laid_out_powers = [dict(item) for item in power_symbols]
-    laid_out_labels = [dict(item) for item in labels]
-    refs = [str(symbol["reference"]) for symbol in laid_out_symbols if symbol.get("reference")]
-    ordered_refs = _order_refs_by_connectivity(refs, nets)
-
-    cell_w = NETLIST_LAYOUT_COLUMN_SPACING_MM
-    cell_h = NETLIST_LAYOUT_ROW_SPACING_MM
-    sym_by_ref = {str(s.get("reference", "")): s for s in laid_out_symbols if s.get("reference")}
-
-    # Size-aware: each symbol reserves a grid block sized to its real pin extent
-    # plus a margin for terminal stubs/labels, so a large multi-pin part (and its
-    # label fan-out) cannot land on top of a neighbour. Footprints are computed
-    # once and reused for sheet sizing and placement.
+def _compute_netlist_paper(
+    sym_by_ref: dict[str, dict[str, Any]],
+    paper: str,
+    max_paper: str | None,
+    cell_w: float,
+    cell_h: float,
+) -> tuple[dict[str, tuple[int, int]], dict[str, tuple[float, float, float, float] | None], str]:
     footprints: dict[str, tuple[int, int]] = {}
     offsets: dict[str, tuple[float, float, float, float] | None] = {}
     for reference, symbol in sym_by_ref.items():
@@ -1693,8 +1677,18 @@ def _apply_netlist_auto_layout(
         cell_w=cell_w,
         cell_h=cell_h,
     )
+    return footprints, offsets, chosen_paper
 
-    # Use occupancy grid to avoid symbol collisions in netlist layout too.
+
+def _position_netlist_symbols(
+    laid_out_symbols: list[dict[str, Any]],
+    ordered_refs: list[str],
+    footprints: dict[str, tuple[int, int]],
+    offsets: dict[str, tuple[float, float, float, float] | None],
+    chosen_paper: str,
+    cell_w: float,
+    cell_h: float,
+) -> dict[str, tuple[float, float]]:
     netlist_occupied: set[tuple[int, int]] = set()
     for symbol in laid_out_symbols:
         if _has_point(symbol):
@@ -1715,7 +1709,6 @@ def _apply_netlist_auto_layout(
         extent = offsets.get(reference)
         if extent is not None:
             min_dx, min_dy, _, _ = extent
-            # Seat the body inside the block with a half-margin gutter for labels.
             raw_x = cell_x - min_dx + _NETLIST_LABEL_MARGIN_W_MM / 2.0
             raw_y = cell_y - min_dy + _NETLIST_LABEL_MARGIN_H_MM / 2.0
             generated_positions[reference] = _snap_point(raw_x, raw_y, True)
@@ -1731,16 +1724,23 @@ def _apply_netlist_auto_layout(
             else:
                 x, y = _next_free_cell(
                     netlist_occupied,
-                    cell_w=NETLIST_LAYOUT_COLUMN_SPACING_MM,
-                    cell_h=NETLIST_LAYOUT_ROW_SPACING_MM,
+                    cell_w=cell_w,
+                    cell_h=cell_h,
                     paper=chosen_paper,
                 )
             _set_point(symbol, x, y)
         point = (_coord_value(symbol, "x"), _coord_value(symbol, "y"))
         if point[0] is not None and point[1] is not None and reference:
             symbol_positions[reference] = (point[0], point[1])
+    return symbol_positions
 
-    known_refs = set(symbol_positions)
+
+def _position_netlist_powers(
+    laid_out_powers: list[dict[str, Any]],
+    nets: list[dict[str, Any]],
+    known_refs: set[str],
+    symbol_positions: dict[str, tuple[float, float]],
+) -> None:
     for index, power_symbol in enumerate(laid_out_powers):
         if _has_point(power_symbol):
             continue
@@ -1771,6 +1771,13 @@ def _apply_netlist_auto_layout(
             )
         _set_point(power_symbol, x, y)
 
+
+def _position_netlist_labels(
+    laid_out_labels: list[dict[str, Any]],
+    nets: list[dict[str, Any]],
+    known_refs: set[str],
+    symbol_positions: dict[str, tuple[float, float]],
+) -> None:
     for index, label in enumerate(laid_out_labels):
         if _has_point(label):
             continue
@@ -1787,6 +1794,35 @@ def _apply_netlist_auto_layout(
             x = center[0]
             y = center[1] + NETLIST_LABEL_OFFSET_MM
         _set_point(label, x, y)
+
+
+def _apply_netlist_auto_layout(
+    symbols: list[dict[str, Any]],
+    power_symbols: list[dict[str, Any]],
+    labels: list[dict[str, Any]],
+    nets: list[dict[str, Any]],
+    *,
+    paper: str = "A4",
+    max_paper: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], str]:
+    laid_out_symbols = [dict(item) for item in symbols]
+    laid_out_powers = [dict(item) for item in power_symbols]
+    laid_out_labels = [dict(item) for item in labels]
+    refs = [str(symbol["reference"]) for symbol in laid_out_symbols if symbol.get("reference")]
+    ordered_refs = _order_refs_by_connectivity(refs, nets)
+    sym_by_ref = {str(s.get("reference", "")): s for s in laid_out_symbols if s.get("reference")}
+
+    cell_w = NETLIST_LAYOUT_COLUMN_SPACING_MM
+    cell_h = NETLIST_LAYOUT_ROW_SPACING_MM
+    footprints, offsets, chosen_paper = _compute_netlist_paper(
+        sym_by_ref, paper, max_paper, cell_w, cell_h
+    )
+    symbol_positions = _position_netlist_symbols(
+        laid_out_symbols, ordered_refs, footprints, offsets, chosen_paper, cell_w, cell_h
+    )
+    known_refs = set(symbol_positions)
+    _position_netlist_powers(laid_out_powers, nets, known_refs, symbol_positions)
+    _position_netlist_labels(laid_out_labels, nets, known_refs, symbol_positions)
 
     return laid_out_symbols, laid_out_powers, laid_out_labels, chosen_paper
 
@@ -3732,6 +3768,29 @@ def get_pin_positions(
     return pins
 
 
+def _load_symbol_blocks_for_unit(
+    library: str,
+    symbol_name: str,
+    unit: int,
+    sch_dir: Path | None,
+) -> list[str] | None:
+    sym_file = _symbol_library_file(library)
+    if sym_file is None and sch_dir is not None:
+        fallback = sch_dir / "symbols" / f"{library}.kicad_sym"
+        if fallback.exists():
+            sym_file = fallback
+    if sym_file is None:
+        return None
+    content = sym_file.read_text(encoding="utf-8", errors="ignore")
+    blocks = _collect_symbol_blocks(content, symbol_name)
+    if not blocks:
+        return None
+    available_units = _available_units_from_blocks(blocks)
+    if available_units and unit not in available_units:
+        return None
+    return blocks
+
+
 def get_pin_metadata(
     library: str,
     symbol_name: str,
@@ -3748,19 +3807,8 @@ def get_pin_metadata(
     ``sch_dir`` is an optional fallback directory; if the library is not found
     via the global config, the function also checks ``<sch_dir>/symbols/``.
     """
-    sym_file = _symbol_library_file(library)
-    if sym_file is None and sch_dir is not None:
-        fallback = sch_dir / "symbols" / f"{library}.kicad_sym"
-        if fallback.exists():
-            sym_file = fallback
-    if sym_file is None:
-        return {}
-    content = sym_file.read_text(encoding="utf-8", errors="ignore")
-    blocks = _collect_symbol_blocks(content, symbol_name)
-    if not blocks:
-        return {}
-    available_units = _available_units_from_blocks(blocks)
-    if available_units and unit not in available_units:
+    blocks = _load_symbol_blocks_for_unit(library, symbol_name, unit, sch_dir)
+    if blocks is None:
         return {}
 
     meta: dict[str, dict[str, str]] = {}
@@ -3784,6 +3832,50 @@ def get_pin_metadata(
             for record in _extract_pin_records(child_block):
                 _record(record)
     return meta
+
+
+def _degenerate_stub_direction(
+    px: float,
+    py: float,
+    ox: float,
+    oy: float,
+    x_span: float,
+    y_span: float,
+    edge_tol: float,
+) -> tuple[float, float] | None:
+    if x_span <= edge_tol and y_span > edge_tol:
+        if abs(ox - px) <= edge_tol:
+            return (0.0, (1.0 if py >= oy else -1.0))
+        return ((1.0 if px >= ox else -1.0), 0.0)
+    if y_span <= edge_tol and x_span > edge_tol:
+        if abs(oy - py) <= edge_tol:
+            return ((1.0 if px >= ox else -1.0), 0.0)
+        return (0.0, (1.0 if py >= oy else -1.0))
+    return None
+
+
+def _edge_stub_direction(
+    px: float,
+    py: float,
+    min_x: float,
+    max_x: float,
+    min_y: float,
+    max_y: float,
+    x_span: float,
+    y_span: float,
+    edge_tol: float,
+) -> tuple[float, float] | None:
+    if x_span > edge_tol:
+        if abs(px - min_x) <= edge_tol:
+            return (-1.0, 0.0)
+        if abs(px - max_x) <= edge_tol:
+            return (1.0, 0.0)
+    if y_span > edge_tol:
+        if abs(py - min_y) <= edge_tol:
+            return (0.0, -1.0)
+        if abs(py - max_y) <= edge_tol:
+            return (0.0, 1.0)
+    return None
 
 
 def _pin_label_stub_direction(
@@ -3816,39 +3908,15 @@ def _pin_label_stub_direction(
         ys = [y for _, y in points]
         min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
-        # Pin coordinates are rounded to 1e-4 mm by get_pin_positions().  Use a
-        # small tolerance so grid/rotation floating point noise cannot flip a
-        # true edge pin into the origin fallback.
         edge_tol = 1e-3
         x_span = max_x - min_x
         y_span = max_y - min_y
-        # A degenerate one-dimensional pin layout has no second axis to read the
-        # outward direction from, so the body center decides it: a pin always
-        # points away from the body.  When the center lies ON the row/column the
-        # part is a two-terminal device (R, C, D, SW, LED) whose pins point ALONG
-        # the axis; the stub must follow the axis or the terminal label renders at
-        # rotation 90/270 and reads unreadably.  When the center is OFF the axis
-        # the pins are a connector edge pointing perpendicular to it, and the stub
-        # must stay perpendicular so parallel stubs clear the pin stack instead of
-        # running through neighbouring pins and shorting nets.
-        if x_span <= edge_tol and y_span > edge_tol:
-            if abs(ox - px) <= edge_tol:
-                return (0.0, (1.0 if py >= oy else -1.0))
-            return ((1.0 if px >= ox else -1.0), 0.0)
-        if y_span <= edge_tol and x_span > edge_tol:
-            if abs(oy - py) <= edge_tol:
-                return ((1.0 if px >= ox else -1.0), 0.0)
-            return (0.0, (1.0 if py >= oy else -1.0))
-        if x_span > edge_tol:
-            if abs(px - min_x) <= edge_tol:
-                return (-1.0, 0.0)
-            if abs(px - max_x) <= edge_tol:
-                return (1.0, 0.0)
-        if y_span > edge_tol:
-            if abs(py - min_y) <= edge_tol:
-                return (0.0, -1.0)
-            if abs(py - max_y) <= edge_tol:
-                return (0.0, 1.0)
+        if degen := _degenerate_stub_direction(px, py, ox, oy, x_span, y_span, edge_tol):
+            return degen
+        if edge := _edge_stub_direction(
+            px, py, min_x, max_x, min_y, max_y, x_span, y_span, edge_tol
+        ):
+            return edge
 
     dx, dy = px - ox, py - oy
     if abs(dx) >= abs(dy):
@@ -4751,6 +4819,45 @@ def _route_avoiding_obstacles(
     )
 
 
+def _resolve_symbol_pin(
+    reference: str,
+    pin: str,
+    symbol_points: dict[str, dict[str, tuple[float, float]]],
+    symbol_pin_aliases: dict[str, dict[str, tuple[float, float]]],
+) -> tuple[tuple[float, float] | None, str | None, str]:
+    if pin in symbol_points.get(reference, {}):
+        return symbol_points[reference][pin], None, "pin_number"
+    alias_positions = symbol_pin_aliases.get(reference, {})
+    if pin in alias_positions:
+        return alias_positions[pin], None, "pin_alias"
+    normalized_pin = _normalize_pin_alias(pin)
+    if normalized_pin and normalized_pin in alias_positions:
+        return alias_positions[normalized_pin], None, "pin_alias"
+    return (
+        None,
+        f"pin '{pin}' was not found on symbol '{reference}'",
+        "missing_pin",
+    )
+
+
+def _resolve_reference_endpoint(
+    reference: str,
+    endpoint: dict[str, Any],
+    symbol_points: dict[str, dict[str, tuple[float, float]]],
+    symbol_pin_aliases: dict[str, dict[str, tuple[float, float]]],
+    symbol_centers: dict[str, tuple[float, float]],
+) -> tuple[tuple[float, float] | None, str | None, str]:
+    if reference not in symbol_centers:
+        return None, f"reference '{reference}' was not found", "missing_reference"
+    pin = _endpoint_pin(endpoint)
+    if pin is not None:
+        return _resolve_symbol_pin(reference, pin, symbol_points, symbol_pin_aliases)
+    point = symbol_centers.get(reference)
+    if point is None:
+        return None, f"reference '{reference}' has no resolved placement", "missing_reference"
+    return point, None, "symbol_center"
+
+
 def _resolve_net_endpoint(
     endpoint: dict[str, Any],
     net_name: str,
@@ -4762,27 +4869,13 @@ def _resolve_net_endpoint(
 ) -> tuple[tuple[float, float] | None, str | None, str]:
     reference = _endpoint_reference(endpoint)
     if reference is not None:
-        pin = _endpoint_pin(endpoint)
-        if reference not in symbol_centers:
-            return None, f"reference '{reference}' was not found", "missing_reference"
-        if pin is not None:
-            if pin in symbol_points.get(reference, {}):
-                return symbol_points[reference][pin], None, "pin_number"
-            alias_positions = symbol_pin_aliases.get(reference, {})
-            if pin in alias_positions:
-                return alias_positions[pin], None, "pin_alias"
-            normalized_pin = _normalize_pin_alias(pin)
-            if normalized_pin and normalized_pin in alias_positions:
-                return alias_positions[normalized_pin], None, "pin_alias"
-            return (
-                None,
-                f"pin '{pin}' was not found on symbol '{reference}'",
-                "missing_pin",
-            )
-        point = symbol_centers.get(reference)
-        if point is None:
-            return None, f"reference '{reference}' has no resolved placement", "missing_reference"
-        return point, None, "symbol_center"
+        return _resolve_reference_endpoint(
+            reference,
+            endpoint,
+            symbol_points,
+            symbol_pin_aliases,
+            symbol_centers,
+        )
 
     power = _endpoint_power(endpoint)
     if power is not None:
@@ -4969,6 +5062,268 @@ def _netlist_symbol_geometry(
     return points, aliases, centers, geometry
 
 
+class _NetlistTerminalPlanner:
+    """Helper to plan collision-safe per-pin net terminals for netlist auto-layout."""
+
+    def __init__(
+        self,
+        symbols: list[AddSymbolInput],
+        powers: list[PowerSymbolInput],
+        labels: list[AddLabelInput],
+        nets: list[dict[str, Any]],
+        snap_to_grid: bool,
+    ) -> None:
+        self.symbols = symbols
+        self.powers = powers
+        self.labels = labels
+        self.nets = nets
+        self.snap_to_grid = snap_to_grid
+        self.symbol_points, self.symbol_pin_aliases, self.symbol_centers, self.pin_geometry = (
+            _netlist_symbol_geometry(symbols, snap_to_grid)
+        )
+        self.pin_etypes = self._build_pin_etypes()
+        self.power_points, self.label_points = _collect_power_and_label_points(
+            powers, labels, snap_to_grid
+        )
+        self.terminal_wires: list[dict[str, float | bool]] = []
+        self.terminal_labels: list[dict[str, Any]] = []
+        self.terminal_powers: list[dict[str, Any]] = []
+        self.unresolved_nets: list[dict[str, Any]] = []
+        self.terminal_points: dict[tuple[float, float], str] = {}
+        self.pin_points_seen: dict[tuple[float, float], str] = {}
+        self.net_has_power_out: dict[str, bool] = {}
+        self.net_needs_driver: dict[str, bool] = {}
+        self.net_names_seen: set[str] = set()
+        self.net_label_kinds: dict[str, str | None] = {}
+        self.net_label_shapes: dict[str, str | None] = {}
+        self.net_terminal_max_y = AUTO_LAYOUT_ORIGIN_Y_MM
+        self.resolution_stats = {
+            "resolved_endpoints": 0,
+            "unresolved_endpoints": 0,
+            "pin_alias_resolutions": 0,
+            "symbol_center_resolutions": 0,
+        }
+
+    def _build_pin_etypes(self) -> dict[str, dict[str, str]]:
+        pin_etypes: dict[str, dict[str, str]] = {}
+        for symbol in self.symbols:
+            emap: dict[str, str] = {}
+            for number, info in get_pin_metadata(
+                symbol.library, symbol.symbol_name, symbol.unit
+            ).items():
+                etype = str(info.get("etype", ""))
+                name = str(info.get("name", ""))
+                for key in (number, name, number.casefold(), name.casefold()):
+                    if key:
+                        emap.setdefault(key, etype)
+            pin_etypes.setdefault(symbol.reference, {}).update(emap)
+        return pin_etypes
+
+    def _plan_symbol_endpoint(
+        self,
+        endpoint: dict[str, Any],
+        net_name: str,
+        reference: str,
+        point: tuple[float, float],
+        resolution_kind: str,
+        endpoint_text: str,
+        unresolved_endpoints: list[str],
+        unresolved_details: list[str],
+    ) -> bool:
+        pin_key = _point_key(*point)
+        existing_pin_net = self.pin_points_seen.get(pin_key)
+        if existing_pin_net is not None and existing_pin_net != net_name:
+            unresolved_endpoints.append(endpoint_text)
+            unresolved_details.append(
+                f"{endpoint_text}: pin point already assigned to net '{existing_pin_net}'"
+            )
+            self.resolution_stats["unresolved_endpoints"] += 1
+            return False
+        self.pin_points_seen[pin_key] = net_name
+
+        pin_id = _endpoint_pin(endpoint)
+        etype = self.pin_etypes.get(reference, {}).get(pin_id, "") if pin_id else ""
+        if etype == "power_out":
+            self.net_has_power_out[net_name] = True
+        elif etype == "power_in":
+            self.net_needs_driver.setdefault(net_name, True)
+
+        center, unit_points = self.pin_geometry.get(
+            (reference, _point_key(*point)),
+            (self.symbol_centers[reference], tuple(self.symbol_points.get(reference, {}).values())),
+        )
+        ux, uy = _pin_label_stub_direction(point, center, unit_points)
+        stub = _terminal_stub_length(net_name)
+        ex = round(point[0] + ux * stub, 4)
+        ey = round(point[1] + uy * stub, 4)
+        self.net_terminal_max_y = max(self.net_terminal_max_y, ey)
+        end_key = _point_key(ex, ey)
+        existing_terminal_net = self.terminal_points.get(end_key)
+        if existing_terminal_net is not None and existing_terminal_net != net_name:
+            unresolved_endpoints.append(endpoint_text)
+            unresolved_details.append(
+                f"{endpoint_text}: terminal coordinate collides with net '{existing_terminal_net}'"
+            )
+            self.resolution_stats["unresolved_endpoints"] += 1
+            return False
+        self.terminal_points[end_key] = net_name
+
+        self.terminal_wires.append(
+            {
+                "x1_mm": point[0],
+                "y1_mm": point[1],
+                "x2_mm": ex,
+                "y2_mm": ey,
+                "snap_to_grid": False,
+            }
+        )
+        rotation = _terminal_rotation_from_vector(ux, uy)
+        if _should_place_power_terminal_symbol(net_name):
+            self.terminal_powers.append(
+                {"name": net_name, "x_mm": ex, "y_mm": ey, "rotation": 0, "snap_to_grid": False}
+            )
+        else:
+            self.terminal_labels.append(
+                _terminal_label_spec(
+                    net_name,
+                    ex,
+                    ey,
+                    rotation,
+                    self.net_label_kinds[net_name],
+                    self.net_label_shapes[net_name],
+                )
+            )
+        self.net_names_seen.add(net_name)
+        self.resolution_stats["resolved_endpoints"] += 1
+        if resolution_kind == "pin_alias":
+            self.resolution_stats["pin_alias_resolutions"] += 1
+        return True
+
+    def _plan_endpoint(
+        self,
+        endpoint: dict[str, Any],
+        net_name: str,
+        unresolved_endpoints: list[str],
+        unresolved_details: list[str],
+    ) -> bool:
+        reference = _endpoint_reference(endpoint)
+        point, reason, resolution_kind = _resolve_net_endpoint(
+            endpoint,
+            net_name,
+            self.symbol_points,
+            self.symbol_pin_aliases,
+            self.symbol_centers,
+            self.power_points,
+            self.label_points,
+        )
+        endpoint_text = _describe_net_endpoint(endpoint)
+        if point is None:
+            unresolved_endpoints.append(endpoint_text)
+            unresolved_details.append(f"{endpoint_text}: {reason or 'unresolved endpoint'}")
+            self.resolution_stats["unresolved_endpoints"] += 1
+            return False
+
+        if reference is None:
+            self.resolution_stats["resolved_endpoints"] += 1
+            if resolution_kind == "pin_alias":
+                self.resolution_stats["pin_alias_resolutions"] += 1
+            elif resolution_kind == "symbol_center":
+                self.resolution_stats["symbol_center_resolutions"] += 1
+            return False
+
+        if resolution_kind == "symbol_center":
+            unresolved_endpoints.append(endpoint_text)
+            unresolved_details.append(
+                f"{endpoint_text}: pin is required for collision-safe auto-layout terminals"
+            )
+            self.resolution_stats["unresolved_endpoints"] += 1
+            return False
+
+        return self._plan_symbol_endpoint(
+            endpoint=endpoint,
+            net_name=net_name,
+            reference=reference,
+            point=point,
+            resolution_kind=resolution_kind,
+            endpoint_text=endpoint_text,
+            unresolved_endpoints=unresolved_endpoints,
+            unresolved_details=unresolved_details,
+        )
+
+    def _plan_net(self, net: dict[str, Any]) -> None:
+        net_name = _net_name(net)
+        label_kind = _net_label_kind(net)
+        self.net_label_kinds[net_name] = label_kind
+        self.net_label_shapes[net_name] = (
+            net.get("shape") if label_kind == "hierarchical_label" else None
+        )
+        endpoints = _net_endpoints(net)
+        unresolved_endpoints: list[str] = []
+        unresolved_details: list[str] = []
+        generated_count = 0
+        for endpoint in endpoints:
+            if self._plan_endpoint(endpoint, net_name, unresolved_endpoints, unresolved_details):
+                generated_count += 1
+        if generated_count == 0 or unresolved_endpoints:
+            self.unresolved_nets.append(
+                {
+                    "name": net_name or "<unnamed>",
+                    "endpoint_count": len(endpoints),
+                    "resolved_count": generated_count,
+                    "unresolved_endpoints": unresolved_endpoints,
+                    "unresolved_details": unresolved_details,
+                }
+            )
+
+    def _append_pwr_flags(self) -> None:
+        flag_nets = sorted(
+            net_name
+            for net_name in self.net_names_seen
+            if (
+                self.net_needs_driver.get(net_name) or _should_place_power_terminal_symbol(net_name)
+            )
+            and not self.net_has_power_out.get(net_name)
+        )
+        flag_x = AUTO_LAYOUT_ORIGIN_X_MM
+        flag_y = round(self.net_terminal_max_y + NETLIST_LAYOUT_ROW_SPACING_MM, 4)
+        for net_name in flag_nets:
+            fx, fy = _snap_point(flag_x, flag_y, True)
+            self.terminal_powers.append(
+                {"name": "PWR_FLAG", "x_mm": fx, "y_mm": fy, "rotation": 0, "snap_to_grid": False}
+            )
+            self.terminal_labels.append(
+                _terminal_label_spec(
+                    net_name,
+                    fx,
+                    fy,
+                    0,
+                    self.net_label_kinds.get(net_name),
+                    self.net_label_shapes.get(net_name),
+                )
+            )
+            flag_x += NETLIST_LAYOUT_COLUMN_SPACING_MM
+
+    def plan(
+        self,
+    ) -> tuple[
+        list[dict[str, float | bool]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        dict[str, int],
+    ]:
+        for net in self.nets:
+            self._plan_net(net)
+        self._append_pwr_flags()
+        return (
+            self.terminal_wires,
+            self.terminal_powers,
+            self.terminal_labels,
+            self.unresolved_nets,
+            self.resolution_stats,
+        )
+
+
 def _plan_netlist_pin_terminals(
     symbols: list[AddSymbolInput],
     powers: list[PowerSymbolInput],
@@ -4991,227 +5346,7 @@ def _plan_netlist_pin_terminals(
     conventional power symbols.  Same-named terminals connect by name rather than
     by accidental wire geometry.
     """
-    symbol_points, symbol_pin_aliases, symbol_centers, pin_geometry = _netlist_symbol_geometry(
-        symbols, snap_to_grid
-    )
-
-    # Pin electrical types, keyed by number/name/case-fold, so a net's driver
-    # status can be judged: KiCad's plain power symbols (power:+3V3, power:GND)
-    # are power_in, so a rail with only power_in pins and no power_out source
-    # needs a PWR_FLAG or ERC reports "input power pin not driven".
-    pin_etypes: dict[str, dict[str, str]] = {}
-    for symbol in symbols:
-        emap: dict[str, str] = {}
-        for number, info in get_pin_metadata(
-            symbol.library, symbol.symbol_name, symbol.unit
-        ).items():
-            etype = str(info.get("etype", ""))
-            name = str(info.get("name", ""))
-            for key in (number, name, number.casefold(), name.casefold()):
-                if key:
-                    emap.setdefault(key, etype)
-        pin_etypes.setdefault(symbol.reference, {}).update(emap)
-
-    power_points: dict[str, tuple[float, float]] = {}
-    for power in powers:
-        x, y = _snap_point(power.x_mm, power.y_mm, snap_to_grid and power.snap_to_grid)
-        power_points.setdefault(power.name.upper(), (x, y))
-
-    label_points: dict[str, tuple[float, float]] = {}
-    for label in labels:
-        x, y = _snap_point(label.x_mm, label.y_mm, snap_to_grid and label.snap_to_grid)
-        label_points.setdefault(label.name, (x, y))
-
-    terminal_wires: list[dict[str, float | bool]] = []
-    terminal_labels: list[dict[str, Any]] = []
-    terminal_powers: list[dict[str, Any]] = []
-    unresolved_nets: list[dict[str, Any]] = []
-    terminal_points: dict[tuple[float, float], str] = {}
-    pin_points_seen: dict[tuple[float, float], str] = {}
-    net_has_power_out: dict[str, bool] = {}
-    net_needs_driver: dict[str, bool] = {}
-    net_names_seen: set[str] = set()
-    net_terminal_max_y = AUTO_LAYOUT_ORIGIN_Y_MM
-    resolution_stats = {
-        "resolved_endpoints": 0,
-        "unresolved_endpoints": 0,
-        "pin_alias_resolutions": 0,
-        "symbol_center_resolutions": 0,
-    }
-
-    net_label_kinds: dict[str, str | None] = {}
-    net_label_shapes: dict[str, str | None] = {}
-    for net in nets:
-        net_name = _net_name(net)
-        label_kind = _net_label_kind(net)
-        net_label_kinds[net_name] = label_kind
-        net_shape = net.get("shape") if label_kind == "hierarchical_label" else None
-        net_label_shapes[net_name] = net_shape
-        endpoints = _net_endpoints(net)
-        unresolved_endpoints: list[str] = []
-        unresolved_details: list[str] = []
-        generated_terminal_count = 0
-        for endpoint in endpoints:
-            reference = _endpoint_reference(endpoint)
-            if reference is None:
-                point, reason, resolution_kind = _resolve_net_endpoint(
-                    endpoint,
-                    net_name,
-                    symbol_points,
-                    symbol_pin_aliases,
-                    symbol_centers,
-                    power_points,
-                    label_points,
-                )
-                if point is None:
-                    endpoint_text = _describe_net_endpoint(endpoint)
-                    unresolved_endpoints.append(endpoint_text)
-                    unresolved_details.append(f"{endpoint_text}: {reason or 'unresolved endpoint'}")
-                    resolution_stats["unresolved_endpoints"] += 1
-                else:
-                    resolution_stats["resolved_endpoints"] += 1
-                    if resolution_kind == "pin_alias":
-                        resolution_stats["pin_alias_resolutions"] += 1
-                    elif resolution_kind == "symbol_center":
-                        resolution_stats["symbol_center_resolutions"] += 1
-                continue
-
-            point, reason, resolution_kind = _resolve_net_endpoint(
-                endpoint,
-                net_name,
-                symbol_points,
-                symbol_pin_aliases,
-                symbol_centers,
-                power_points,
-                label_points,
-            )
-            endpoint_text = _describe_net_endpoint(endpoint)
-            if point is None:
-                unresolved_endpoints.append(endpoint_text)
-                unresolved_details.append(f"{endpoint_text}: {reason or 'unresolved endpoint'}")
-                resolution_stats["unresolved_endpoints"] += 1
-                continue
-            if resolution_kind == "symbol_center":
-                unresolved_endpoints.append(endpoint_text)
-                unresolved_details.append(
-                    f"{endpoint_text}: pin is required for collision-safe auto-layout terminals"
-                )
-                resolution_stats["unresolved_endpoints"] += 1
-                continue
-
-            pin_key = _point_key(*point)
-            existing_pin_net = pin_points_seen.get(pin_key)
-            if existing_pin_net is not None and existing_pin_net != net_name:
-                unresolved_endpoints.append(endpoint_text)
-                unresolved_details.append(
-                    f"{endpoint_text}: pin point already assigned to net '{existing_pin_net}'"
-                )
-                resolution_stats["unresolved_endpoints"] += 1
-                continue
-            pin_points_seen[pin_key] = net_name
-
-            pin_id = _endpoint_pin(endpoint)
-            etype = pin_etypes.get(reference, {}).get(pin_id, "") if pin_id else ""
-            if etype == "power_out":
-                net_has_power_out[net_name] = True
-            elif etype == "power_in":
-                net_needs_driver.setdefault(net_name, True)
-
-            center, unit_points = pin_geometry.get(
-                (reference, _point_key(*point)),
-                (symbol_centers[reference], tuple(symbol_points.get(reference, {}).values())),
-            )
-            ux, uy = _pin_label_stub_direction(point, center, unit_points)
-            stub = _terminal_stub_length(net_name)
-            ex = round(point[0] + ux * stub, 4)
-            ey = round(point[1] + uy * stub, 4)
-            net_terminal_max_y = max(net_terminal_max_y, ey)
-            end_key = _point_key(ex, ey)
-            existing_terminal_net = terminal_points.get(end_key)
-            if existing_terminal_net is not None and existing_terminal_net != net_name:
-                unresolved_endpoints.append(endpoint_text)
-                unresolved_details.append(
-                    f"{endpoint_text}: terminal coordinate collides with net "
-                    f"'{existing_terminal_net}'"
-                )
-                resolution_stats["unresolved_endpoints"] += 1
-                continue
-            terminal_points[end_key] = net_name
-
-            terminal_wires.append(
-                {
-                    "x1_mm": point[0],
-                    "y1_mm": point[1],
-                    "x2_mm": ex,
-                    "y2_mm": ey,
-                    "snap_to_grid": False,
-                }
-            )
-            rotation = _terminal_rotation_from_vector(ux, uy)
-            if _should_place_power_terminal_symbol(net_name):
-                terminal_powers.append(
-                    {"name": net_name, "x_mm": ex, "y_mm": ey, "rotation": 0, "snap_to_grid": False}
-                )
-            else:
-                terminal_labels.append(
-                    _terminal_label_spec(
-                        net_name,
-                        ex,
-                        ey,
-                        rotation,
-                        net_label_kinds[net_name],
-                        net_label_shapes[net_name],
-                    )
-                )
-            generated_terminal_count += 1
-            net_names_seen.add(net_name)
-            resolution_stats["resolved_endpoints"] += 1
-            if resolution_kind == "pin_alias":
-                resolution_stats["pin_alias_resolutions"] += 1
-
-        if generated_terminal_count == 0 or unresolved_endpoints:
-            unresolved_nets.append(
-                {
-                    "name": net_name or "<unnamed>",
-                    "endpoint_count": len(endpoints),
-                    "resolved_count": generated_terminal_count,
-                    "unresolved_endpoints": unresolved_endpoints,
-                    "unresolved_details": unresolved_details,
-                }
-            )
-
-    # Auto PWR_FLAG: a power rail whose only power pins are power_in (its own
-    # power symbol, IC supply pins) and that no power_out source drives would fail
-    # ERC's "input power pin not driven" check. Add one PWR_FLAG (a power_out
-    # symbol) per such rail, connected by name via a co-located global label, in a
-    # strip clear of the placed terminals. Rails already driven by a regulator
-    # output (power_out) are left untouched so real "undriven" errors still show.
-    flag_nets = sorted(
-        net_name
-        for net_name in net_names_seen
-        if (net_needs_driver.get(net_name) or _should_place_power_terminal_symbol(net_name))
-        and not net_has_power_out.get(net_name)
-    )
-    flag_x = AUTO_LAYOUT_ORIGIN_X_MM
-    flag_y = round(net_terminal_max_y + NETLIST_LAYOUT_ROW_SPACING_MM, 4)
-    for net_name in flag_nets:
-        fx, fy = _snap_point(flag_x, flag_y, True)
-        terminal_powers.append(
-            {"name": "PWR_FLAG", "x_mm": fx, "y_mm": fy, "rotation": 0, "snap_to_grid": False}
-        )
-        terminal_labels.append(
-            _terminal_label_spec(
-                net_name,
-                fx,
-                fy,
-                0,
-                net_label_kinds.get(net_name),
-                net_label_shapes.get(net_name),
-            )
-        )
-        flag_x += NETLIST_LAYOUT_COLUMN_SPACING_MM
-
-    return terminal_wires, terminal_powers, terminal_labels, unresolved_nets, resolution_stats
+    return _NetlistTerminalPlanner(symbols, powers, labels, nets, snap_to_grid).plan()
 
 
 def _collect_power_and_label_points(
@@ -6053,7 +6188,7 @@ def _duplicate_uuids(content: str) -> set[str]:
     return duplicates
 
 
-def _validate_schematic_text(content: str) -> None:
+def _is_balanced_sexpr(content: str) -> bool:
     depth = 0
     in_string = False
     escaped = False
@@ -6072,8 +6207,12 @@ def _validate_schematic_text(content: str) -> None:
         elif char == ")":
             depth -= 1
             if depth < 0:
-                break
-    if depth != 0 or in_string:
+                return False
+    return depth == 0 and not in_string
+
+
+def _validate_schematic_text(content: str) -> None:
+    if not _is_balanced_sexpr(content):
         raise ValueError("Refusing to write an invalid schematic with unbalanced parentheses.")
     if re.search(r'\(paper\s+"User"\s*\)', content):
         raise ValueError(

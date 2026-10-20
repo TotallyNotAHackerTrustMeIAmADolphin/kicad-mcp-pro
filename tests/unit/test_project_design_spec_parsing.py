@@ -304,3 +304,19 @@ def test_infer_design_intent_from_board_with_footprints(
     )
     _intent, notes = _infer_design_intent_from_board()
     assert any("decoupling pair" in note for note in notes)
+
+
+def test_parse_simple_yaml_empty_dict_item() -> None:
+    yaml_text = """items:
+  - key:
+"""
+    parsed = _parse_simple_yaml(yaml_text)
+    assert parsed == {"items": [{"key": None}]}
+
+
+def test_parse_simple_yaml_empty_list_item_and_nested_block() -> None:
+    from kicad_mcp.project.design_spec import _SimpleYamlParser
+
+    parser = _SimpleYamlParser([(0, "- "), (2, "nested: 42"), (0, "- ")])
+    parsed = parser.parse()
+    assert parsed == [{"nested": 42}, None]

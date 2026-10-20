@@ -13,6 +13,9 @@ from html import escape
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+if TYPE_CHECKING:
+    from .design_intent_state import ProjectDesignIntent
+
 from mcp.server.mcpserver import MCPServer as FastMCP
 from pydantic import BaseModel, Field
 
@@ -1341,9 +1344,80 @@ def _check_symbol_connectivity_and_contracts(
     return matched_contracts, isolated_symbols, contract_violations
 
 
-def _evaluate_schematic_connectivity_gate() -> GateOutcome:
+@dataclass
+class _ConnectivityGateCounters:
+    required_empty_sheets: int = 0
+    optional_empty_sheets: int = 0
+    placeholder_empty_sheets: int = 0
+    zero_wire_pages: int = 0
+    dangling_labels: int = 0
+    unnamed_single_pin_groups: int = 0
+    matched_component_contracts: int = 0
+    isolated_footprint_symbols: int = 0
+    contract_violations: int = 0
+
+
+def _analyze_single_page_connectivity(
+    page_name: str,
+    page_path: Path,
+    counters: _ConnectivityGateCounters,
+    *,
+    sheet_keys_by_path: dict[Path, set[str]],
+    has_sheet_contract: bool,
+    required_sheet_keys: set[str],
+    optional_sheet_keys: set[str],
+    blocked: list[str],
+    failures: list[str],
+    page_summaries: list[str],
+) -> None:
     from .schematic import _build_connectivity_groups, parse_schematic_file
 
+    if not page_path.exists():
+        return
+    try:
+        data = parse_schematic_file(page_path)
+        groups = _build_connectivity_groups(page_path)
+    except (OSError, RuntimeError, ValueError) as exc:
+        blocked.append(f"{page_name}: connectivity data was unavailable ({exc}).")
+        return
+
+    symbol_count = len(data["symbols"]) + len(data["power_symbols"])
+    label_count = len(data["labels"])
+    wire_count = len(data["wires"])
+    page_summaries.append(
+        f"{page_name}: {symbol_count} symbol(s), {label_count} label(s), {wire_count} wire(s)"
+    )
+
+    page_keys = sheet_keys_by_path.get(page_path, set())
+    is_child_sheet = page_name != _TOP_LEVEL_SHEET
+    is_empty_sheet = symbol_count == 0 and label_count == 0 and wire_count == 0
+    if has_sheet_contract and is_child_sheet and is_empty_sheet:
+        req_e, opt_e, plc_e = _classify_empty_sheet(
+            page_keys, required_sheet_keys, optional_sheet_keys, page_name, failures
+        )
+        counters.required_empty_sheets += req_e
+        counters.optional_empty_sheets += opt_e
+        counters.placeholder_empty_sheets += plc_e
+
+    if wire_count == 0 and (symbol_count >= 2 or label_count >= 3):
+        counters.zero_wire_pages += 1
+        failures.append(
+            f"{page_name}: has {symbol_count} symbol(s) and {label_count} label(s) but 0 wires."
+        )
+
+    dangling_cnt, unnamed_cnt = _check_connectivity_group_smells(page_name, groups, failures)
+    counters.dangling_labels += dangling_cnt
+    counters.unnamed_single_pin_groups += unnamed_cnt
+
+    matched_c, isolated_s, violations_c = _check_symbol_connectivity_and_contracts(
+        page_name, cast(list[dict[str, object]], data["symbols"]), groups, failures
+    )
+    counters.matched_component_contracts += matched_c
+    counters.isolated_footprint_symbols += isolated_s
+    counters.contract_violations += violations_c
+
+
+def _evaluate_schematic_connectivity_gate() -> GateOutcome:
     try:
         top_file = _get_sch_file()
     except ValueError as exc:
@@ -1391,82 +1465,42 @@ def _evaluate_schematic_connectivity_gate() -> GateOutcome:
                     f"Required sheet '{sheet}' is not present in the schematic hierarchy."
                 )
 
-    dangling_labels = 0
-    zero_wire_pages = 0
-    unnamed_single_pin_groups = 0
-    isolated_footprint_symbols = 0
-    matched_component_contracts = 0
-    contract_violations = 0
-    required_empty_sheets = 0
-    optional_empty_sheets = 0
-    placeholder_empty_sheets = 0
-
+    counters = _ConnectivityGateCounters()
     for page_name, page_path in pages:
-        if not page_path.exists():
-            continue
-        try:
-            data = parse_schematic_file(page_path)
-            groups = _build_connectivity_groups(page_path)
-        except (OSError, RuntimeError, ValueError) as exc:
-            blocked.append(f"{page_name}: connectivity data was unavailable ({exc}).")
-            continue
-
-        symbol_count = len(data["symbols"]) + len(data["power_symbols"])
-        label_count = len(data["labels"])
-        wire_count = len(data["wires"])
-        page_summaries.append(
-            f"{page_name}: {symbol_count} symbol(s), {label_count} label(s), {wire_count} wire(s)"
+        _analyze_single_page_connectivity(
+            page_name,
+            page_path,
+            counters,
+            sheet_keys_by_path=sheet_keys_by_path,
+            has_sheet_contract=has_sheet_contract,
+            required_sheet_keys=required_sheet_keys,
+            optional_sheet_keys=optional_sheet_keys,
+            blocked=blocked,
+            failures=failures,
+            page_summaries=page_summaries,
         )
-
-        page_keys = sheet_keys_by_path.get(page_path, set())
-        is_child_sheet = page_name != _TOP_LEVEL_SHEET
-        is_empty_sheet = symbol_count == 0 and label_count == 0 and wire_count == 0
-        if has_sheet_contract and is_child_sheet and is_empty_sheet:
-            req_e, opt_e, plc_e = _classify_empty_sheet(
-                page_keys, required_sheet_keys, optional_sheet_keys, page_name, failures
-            )
-            required_empty_sheets += req_e
-            optional_empty_sheets += opt_e
-            placeholder_empty_sheets += plc_e
-
-        if wire_count == 0 and (symbol_count >= 2 or label_count >= 3):
-            zero_wire_pages += 1
-            failures.append(
-                f"{page_name}: has {symbol_count} symbol(s) and {label_count} label(s) but 0 wires."
-            )
-
-        dangling_cnt, unnamed_cnt = _check_connectivity_group_smells(page_name, groups, failures)
-        dangling_labels += dangling_cnt
-        unnamed_single_pin_groups += unnamed_cnt
-
-        matched_c, isolated_s, violations_c = _check_symbol_connectivity_and_contracts(
-            page_name, cast(list[dict[str, object]], data["symbols"]), groups, failures
-        )
-        matched_component_contracts += matched_c
-        isolated_footprint_symbols += isolated_s
-        contract_violations += violations_c
 
     hierarchy_mismatches = sum("Hierarchy contract mismatch" in item for item in failures)
     details = [f"Pages analysed: {len(pages)}"]
     details.extend(page_summaries[:12])
     details.extend(
         [
-            f"Dangling label groups: {dangling_labels}",
-            f"Zero-wire pages: {zero_wire_pages}",
-            f"Unnamed single-pin groups: {unnamed_single_pin_groups}",
-            f"Isolated footprint symbols: {isolated_footprint_symbols}",
+            f"Dangling label groups: {counters.dangling_labels}",
+            f"Zero-wire pages: {counters.zero_wire_pages}",
+            f"Unnamed single-pin groups: {counters.unnamed_single_pin_groups}",
+            f"Isolated footprint symbols: {counters.isolated_footprint_symbols}",
             f"Hierarchy contract mismatches: {hierarchy_mismatches}",
-            f"Matched component contracts: {matched_component_contracts}",
-            f"Component contract violations: {contract_violations}",
+            f"Matched component contracts: {counters.matched_component_contracts}",
+            f"Component contract violations: {counters.contract_violations}",
         ]
     )
     if has_sheet_contract:
         details.extend(
             [
                 f"Required missing sheets: {required_missing_sheets}",
-                f"Required empty sheets: {required_empty_sheets}",
-                f"Optional empty sheets: {optional_empty_sheets}",
-                f"Placeholder empty sheets: {placeholder_empty_sheets}",
+                f"Required empty sheets: {counters.required_empty_sheets}",
+                f"Optional empty sheets: {counters.optional_empty_sheets}",
+                f"Placeholder empty sheets: {counters.placeholder_empty_sheets}",
             ]
         )
     if blocked:
@@ -1713,13 +1747,560 @@ def _manhattan_mst_length(points: list[tuple[float, float]]) -> float:
     return total
 
 
+class _PlacementEvaluator:
+    """Evaluate PCB placement quality, design intent rules, and mechanical constraints."""
+
+    def __init__(
+        self,
+        content: str,
+        footprints: dict[str, dict[str, Any]],
+        intent: ProjectDesignIntent,
+    ) -> None:
+        from .board_file import _board_frame_mm
+
+        self.content = content
+        self.footprints = footprints
+        self.intent = intent
+        self.min_x, self.min_y, self.max_x, self.max_y = _board_frame_mm(content, footprints)
+        self.frame = (self.min_x, self.min_y, self.max_x, self.max_y)
+        self.board_width_mm = self.max_x - self.min_x
+        self.board_height_mm = self.max_y - self.min_y
+        self.board_area_mm2 = max(self.board_width_mm * self.board_height_mm, 1.0)
+        self.board_diagonal = math.hypot(self.board_width_mm, self.board_height_mm)
+        self.footprint_area_mm2 = sum(
+            float(entry["width_mm"]) * float(entry["height_mm"]) for entry in footprints.values()
+        )
+        self.density_pct = round((self.footprint_area_mm2 / self.board_area_mm2) * 100.0, 2)
+        self.warnings: list[str] = []
+
+    def _evaluate_geometry_and_overlaps(self) -> tuple[list[str], list[str], list[str]]:
+        from .board_file import _placement_boxes_overlap
+
+        missing_position = [
+            reference
+            for reference, entry in self.footprints.items()
+            if entry["x_mm"] is None or entry["y_mm"] is None
+        ]
+        overlaps: list[str] = []
+        outside: list[str] = []
+        items = sorted(self.footprints.items())
+        for index, (left_ref, left_entry) in enumerate(items):
+            if left_entry["x_mm"] is None or left_entry["y_mm"] is None:
+                continue
+            left_x = float(left_entry["x_mm"])
+            left_y = float(left_entry["y_mm"])
+            left_w = float(left_entry["width_mm"])
+            left_h = float(left_entry["height_mm"])
+            if (
+                left_x - (left_w / 2) < self.min_x
+                or left_x + (left_w / 2) > self.max_x
+                or left_y - (left_h / 2) < self.min_y
+                or left_y + (left_h / 2) > self.max_y
+            ):
+                outside.append(left_ref)
+            for right_ref, right_entry in items[index + 1 :]:
+                if right_entry["x_mm"] is None or right_entry["y_mm"] is None:
+                    continue
+                if _placement_boxes_overlap(
+                    left_x,
+                    left_y,
+                    left_w,
+                    left_h,
+                    float(right_entry["x_mm"]),
+                    float(right_entry["y_mm"]),
+                    float(right_entry["width_mm"]),
+                    float(right_entry["height_mm"]),
+                    0.0,
+                ):
+                    overlaps.append(f"{left_ref}/{right_ref}")
+        return missing_position, overlaps, outside
+
+    def _evaluate_connectors(self) -> tuple[list[str], int]:
+        connector_edge_violations: list[str] = []
+        checked_connectors = 0
+        for reference in self.intent.connector_refs:
+            entry = self.footprints.get(reference)
+            if entry is None:
+                connector_edge_violations.append(f"Connector intent ref '{reference}' is missing.")
+                continue
+            checked_connectors += 1
+            distance = _nearest_edge_distance(entry, self.frame)
+            if distance is None:
+                connector_edge_violations.append(
+                    f"Connector '{reference}' has no resolved placement to evaluate."
+                )
+                continue
+            if distance > 5.0:
+                connector_edge_violations.append(
+                    f"Connector '{reference}' is {distance:.2f} mm from the nearest edge."
+                )
+        return connector_edge_violations, checked_connectors
+
+    def _evaluate_decoupling(self) -> tuple[list[str], int]:
+        decoupling_distance_violations: list[str] = []
+        checked_decoupling_pairs = 0
+        for pair in self.intent.decoupling_pairs:
+            ic_entry = self.footprints.get(pair.ic_ref)
+            if ic_entry is None:
+                decoupling_distance_violations.append(
+                    f"Decoupling IC ref '{pair.ic_ref}' is missing on the board."
+                )
+                continue
+            if ic_entry["x_mm"] is None or ic_entry["y_mm"] is None:
+                decoupling_distance_violations.append(
+                    f"Decoupling IC ref '{pair.ic_ref}' has no resolved placement."
+                )
+                continue
+            checked_decoupling_pairs += 1
+            cap_distances: list[float] = []
+            missing_caps: list[str] = []
+            for cap_ref in pair.cap_refs:
+                cap_entry = self.footprints.get(cap_ref)
+                if cap_entry is None or cap_entry["x_mm"] is None or cap_entry["y_mm"] is None:
+                    missing_caps.append(cap_ref)
+                    continue
+                cap_distances.append(
+                    math.hypot(
+                        float(ic_entry["x_mm"]) - float(cap_entry["x_mm"]),
+                        float(ic_entry["y_mm"]) - float(cap_entry["y_mm"]),
+                    )
+                )
+            if missing_caps:
+                decoupling_distance_violations.append(
+                    f"{pair.ic_ref}: missing or unresolved decoupling caps -> "
+                    + ", ".join(missing_caps[:12])
+                )
+            if cap_distances and min(cap_distances) > pair.max_distance_mm:
+                decoupling_distance_violations.append(
+                    f"{pair.ic_ref}: nearest decoupling cap is {min(cap_distances):.2f} mm away "
+                    f"(limit {pair.max_distance_mm:.2f} mm)."
+                )
+        return decoupling_distance_violations, checked_decoupling_pairs
+
+    def _evaluate_keepouts(self) -> tuple[list[str], int]:
+        from .board_file import _placement_boxes_overlap
+
+        keepout_violations: list[str] = []
+        checked_keepouts = 0
+        for region in self.intent.rf_keepout_regions:
+            checked_keepouts += 1
+            for reference, entry in self.footprints.items():
+                if entry["x_mm"] is None or entry["y_mm"] is None:
+                    continue
+                if _placement_boxes_overlap(
+                    float(entry["x_mm"]),
+                    float(entry["y_mm"]),
+                    float(entry["width_mm"]),
+                    float(entry["height_mm"]),
+                    region.x_mm,
+                    region.y_mm,
+                    region.w_mm,
+                    region.h_mm,
+                    0.0,
+                ):
+                    keepout_violations.append(f"{reference} overlaps RF keepout '{region.name}'.")
+        return keepout_violations, checked_keepouts
+
+    def _evaluate_power_tree(self) -> tuple[list[str], int]:
+        power_tree_violations: list[str] = []
+        checked_power_tree_refs = 0
+        present_power_tree: list[str] = []
+        for reference in self.intent.power_tree_refs:
+            entry = self.footprints.get(reference)
+            if entry is None:
+                power_tree_violations.append(f"Power-tree intent ref '{reference}' is missing.")
+                continue
+            if _entry_center(entry) is None:
+                power_tree_violations.append(
+                    f"Power-tree intent ref '{reference}' has no resolved placement."
+                )
+                continue
+            checked_power_tree_refs += 1
+            present_power_tree.append(reference)
+        for left_ref, right_ref in zip(present_power_tree, present_power_tree[1:], strict=False):
+            left_center = _entry_center(self.footprints[left_ref])
+            right_center = _entry_center(self.footprints[right_ref])
+            if left_center is None or right_center is None:
+                continue
+            step_distance = math.hypot(
+                left_center[0] - right_center[0],
+                left_center[1] - right_center[1],
+            )
+            if step_distance > self.board_diagonal * 0.75:
+                power_tree_violations.append(
+                    f"Power-tree step '{left_ref} -> {right_ref}' spans {step_distance:.2f} mm."
+                )
+            elif step_distance > self.board_diagonal * 0.5:
+                self.warnings.append(
+                    f"Power-tree step '{left_ref} -> {right_ref}' spans {step_distance:.2f} mm."
+                )
+        return power_tree_violations, checked_power_tree_refs
+
+    def _evaluate_sensor_clusters(self) -> tuple[list[str], int]:
+        sensor_cluster_violations: list[str] = []
+        missing_sensor_refs = [
+            reference
+            for reference in self.intent.sensor_cluster_refs
+            if reference not in self.footprints or _entry_center(self.footprints[reference]) is None
+        ]
+        if missing_sensor_refs:
+            sensor_cluster_violations.append(
+                "Sensor-cluster refs missing or unresolved: " + ", ".join(missing_sensor_refs[:12])
+            )
+        sensor_cluster_spread, present_sensor_refs = _group_spread_mm(
+            self.intent.sensor_cluster_refs,
+            self.footprints,
+        )
+        checked_sensor_cluster_refs = len(present_sensor_refs)
+        if checked_sensor_cluster_refs >= 2:
+            if sensor_cluster_spread > self.board_diagonal * 0.6:
+                sensor_cluster_violations.append(
+                    f"Sensor cluster spreads {sensor_cluster_spread:.2f} mm across the board."
+                )
+            elif sensor_cluster_spread > self.board_diagonal * 0.35:
+                self.warnings.append(
+                    f"Sensor cluster spreads {sensor_cluster_spread:.2f} mm across the board."
+                )
+        return sensor_cluster_violations, checked_sensor_cluster_refs
+
+    def _evaluate_analog_digital(self) -> tuple[list[str], int, int]:
+        analog_digital_violations: list[str] = []
+        analog_refs = [
+            r
+            for r in self.intent.analog_refs
+            if r in self.footprints and _entry_center(self.footprints[r]) is not None
+        ]
+        digital_refs = [
+            r
+            for r in self.intent.digital_refs
+            if r in self.footprints and _entry_center(self.footprints[r]) is not None
+        ]
+        nearest_mixed_gap: tuple[float, str, str] | None = None
+        for analog_ref in analog_refs:
+            analog_entry = self.footprints[analog_ref]
+            for digital_ref in digital_refs:
+                digital_entry = self.footprints[digital_ref]
+                gap = _bbox_gap_mm(analog_entry, digital_entry)
+                if gap is None:
+                    continue
+                candidate = (gap, analog_ref, digital_ref)
+                if nearest_mixed_gap is None or candidate[0] < nearest_mixed_gap[0]:
+                    nearest_mixed_gap = candidate
+        if nearest_mixed_gap is not None:
+            gap, analog_ref, digital_ref = nearest_mixed_gap
+            msg = (
+                f"Analog ref '{analog_ref}' is only {gap:.2f} mm away from digital ref "
+                f"'{digital_ref}'."
+            )
+            if gap < 1.0:
+                analog_digital_violations.append(msg)
+            elif gap < 3.0:
+                self.warnings.append(msg)
+        return analog_digital_violations, len(analog_refs), len(digital_refs)
+
+    def _evaluate_clustering_and_density(self) -> None:
+        if self.density_pct > 70.0:
+            self.warnings.append(f"Footprint density is high ({self.density_pct:.2f}%).")
+        elif self.density_pct < 5.0 and len(self.footprints) >= 6:
+            self.warnings.append(f"Footprint density is sparse ({self.density_pct:.2f}%).")
+
+        placed_x = [
+            float(entry["x_mm"]) for entry in self.footprints.values() if entry["x_mm"] is not None
+        ]
+        placed_y = [
+            float(entry["y_mm"]) for entry in self.footprints.values() if entry["y_mm"] is not None
+        ]
+        if len(placed_x) >= 2 and len(placed_y) >= 2:
+            span_x = max(placed_x) - min(placed_x)
+            span_y = max(placed_y) - min(placed_y)
+            if len(self.footprints) >= 6 and (
+                span_x > self.board_width_mm * 0.7 or span_y > self.board_height_mm * 0.7
+            ):
+                self.warnings.append("Placement spans most of the board; clustering looks weak.")
+
+    def _evaluate_critical_nets(self) -> tuple[float, float]:
+        critical_net_proxy_mm = 0.0
+        for net_name in self.intent.critical_nets:
+            refs = sorted(
+                reference
+                for reference, entry in self.footprints.items()
+                if net_name in cast(list[str], entry.get("net_names", []))
+                and entry["x_mm"] is not None
+                and entry["y_mm"] is not None
+            )
+            if len(refs) < 2:
+                continue
+            points = [
+                (
+                    float(cast(float, self.footprints[ref]["x_mm"])),
+                    float(cast(float, self.footprints[ref]["y_mm"])),
+                )
+                for ref in refs
+            ]
+            critical_net_proxy_mm += _manhattan_mst_length(points)
+            max_spread = 0.0
+            for index, left_ref in enumerate(refs):
+                left_entry = self.footprints[left_ref]
+                for right_ref in refs[index + 1 :]:
+                    right_entry = self.footprints[right_ref]
+                    max_spread = max(
+                        max_spread,
+                        math.hypot(
+                            float(left_entry["x_mm"]) - float(right_entry["x_mm"]),
+                            float(left_entry["y_mm"]) - float(right_entry["y_mm"]),
+                        ),
+                    )
+            if max_spread > self.board_diagonal * 0.6:
+                self.warnings.append(
+                    f"Critical net '{net_name}' spans {max_spread:.2f} mm across the board."
+                )
+
+        density = round(
+            critical_net_proxy_mm / max(self.board_area_mm2 / 1000.0, 1.0),
+            2,
+        )
+        if density > 80.0:
+            self.warnings.append(
+                "Critical nets require a long Manhattan ratsnest relative to board area "
+                f"({density:.2f} mm per 1000 mm^2)."
+            )
+        return round(critical_net_proxy_mm, 2), density
+
+    def _evaluate_thermal_hotspots(self) -> tuple[list[str], float]:
+        thermal_hotspot_refs = [
+            reference
+            for reference in self.intent.thermal_hotspots
+            if reference in self.footprints
+            and _entry_center(self.footprints[reference]) is not None
+        ]
+        thermal_proximity_sum = 0.0
+        for index, left_ref in enumerate(thermal_hotspot_refs):
+            left_center = _entry_center(self.footprints[left_ref])
+            if left_center is None:
+                continue
+            for right_ref in thermal_hotspot_refs[index + 1 :]:
+                right_center = _entry_center(self.footprints[right_ref])
+                if right_center is None:
+                    continue
+                distance = max(
+                    math.hypot(left_center[0] - right_center[0], left_center[1] - right_center[1]),
+                    0.5,
+                )
+                thermal_proximity_sum += 1.0 / distance
+        if (
+            thermal_hotspot_refs
+            and thermal_proximity_sum > max(len(thermal_hotspot_refs) - 1, 1) * 0.2
+        ):
+            self.warnings.append(
+                "Thermal hotspots are clustered tightly "
+                f"(proximity sum {thermal_proximity_sum:.3f})."
+            )
+        return thermal_hotspot_refs, round(thermal_proximity_sum, 4)
+
+    def _evaluate_high_speed(self) -> tuple[list[str], list[str], int]:
+        hs_grouping_violations: list[str] = []
+        return_path_warnings: list[str] = []
+        checked_hs_interfaces = 0
+        for iface in self.intent.interfaces:
+            present_refs = [r for r in iface.refs if r in self.footprints]
+            if len(present_refs) < 2:
+                continue
+            checked_hs_interfaces += 1
+            centers = [_entry_center(self.footprints[r]) for r in present_refs]
+            valid_centers = [c for c in centers if c is not None]
+            if len(valid_centers) < 2:
+                continue
+            max_spread = 0.0
+            for idx_a, ca in enumerate(valid_centers):
+                for cb in valid_centers[idx_a + 1 :]:
+                    d = math.hypot(ca[0] - cb[0], ca[1] - cb[1])
+                    if d > max_spread:
+                        max_spread = d
+            limit_hard = self.board_diagonal * 0.5
+            limit_warn = self.board_diagonal * 0.3
+            iface_label = f"{iface.kind} ({', '.join(present_refs[:4])})"
+            if max_spread > limit_hard:
+                hs_grouping_violations.append(
+                    f"High-speed interface {iface_label} spans {max_spread:.1f} mm "
+                    f"(limit {limit_hard:.1f} mm) — return current path will be long."
+                )
+            elif max_spread > limit_warn:
+                return_path_warnings.append(
+                    f"High-speed interface {iface_label} spans {max_spread:.1f} mm "
+                    f"(warn {limit_warn:.1f} mm) — consider tighter grouping."
+                )
+        return hs_grouping_violations, return_path_warnings, checked_hs_interfaces
+
+    def _evaluate_mount_holes(self) -> list[str]:
+        violations: list[str] = []
+        for hole in self.intent.mechanical.mount_holes:
+            clearance_mm = max(hole.diameter_mm, 2.0)
+            for reference, entry in self.footprints.items():
+                center = _entry_center(entry)
+                if center is None:
+                    continue
+                dist = math.hypot(center[0] - hole.x_mm, center[1] - hole.y_mm)
+                footprint_radius = math.hypot(
+                    float(entry.get("width_mm", 0.0)) / 2,
+                    float(entry.get("height_mm", 0.0)) / 2,
+                )
+                if dist < clearance_mm + footprint_radius:
+                    violations.append(
+                        f"'{reference}' is {dist:.1f} mm from mount hole at "
+                        f"({hole.x_mm:.1f}, {hole.y_mm:.1f}) — clearance {clearance_mm:.1f} mm "
+                        f"required."
+                    )
+        return violations
+
+    def _dist_to_edge(self, cx: float, cy: float, edge: str) -> float:
+        if edge == "top":
+            return abs(cy - self.min_y)
+        if edge == "bottom":
+            return abs(cy - self.max_y)
+        if edge == "left":
+            return abs(cx - self.min_x)
+        return abs(cx - self.max_x)
+
+    def _evaluate_connector_edge_specs(self) -> list[str]:
+        violations: list[str] = []
+        for edge_spec in self.intent.mechanical.connector_placement:
+            edge_entry = self.footprints.get(edge_spec.ref)
+            if edge_entry is None:
+                continue
+            center = _entry_center(edge_entry)
+            if center is None:
+                continue
+            dist_to_edge = self._dist_to_edge(center[0], center[1], edge_spec.edge)
+            if dist_to_edge > edge_spec.margin_mm:
+                violations.append(
+                    f"Connector '{edge_spec.ref}' is {dist_to_edge:.1f} mm from the "
+                    f"{edge_spec.edge} edge (limit {edge_spec.margin_mm:.1f} mm)."
+                )
+        return violations
+
+    def _evaluate_mechanical(self) -> tuple[list[str], list[str]]:
+        return self._evaluate_mount_holes(), self._evaluate_connector_edge_specs()
+
+    def _calculate_score(
+        self,
+        *,
+        overlaps: list[str],
+        outside: list[str],
+        connector_edge_violations: list[str],
+        decoupling_distance_violations: list[str],
+        keepout_violations: list[str],
+        power_tree_violations: list[str],
+        sensor_cluster_violations: list[str],
+        analog_digital_violations: list[str],
+        warnings: list[str],
+        thermal_proximity_sum: float,
+        critical_net_proxy_density: float,
+        hs_grouping_violations: list[str],
+        mount_hole_violations: list[str],
+        connector_edge_spec_violations: list[str],
+    ) -> int:
+        score = 100
+        score -= min(len(overlaps) * 20, 40)
+        score -= min(len(outside) * 20, 40)
+        score -= min(len(connector_edge_violations) * 15, 30)
+        score -= min(len(decoupling_distance_violations) * 15, 30)
+        score -= min(len(keepout_violations) * 15, 30)
+        score -= min(len(power_tree_violations) * 15, 30)
+        score -= min(len(sensor_cluster_violations) * 15, 30)
+        score -= min(len(analog_digital_violations) * 15, 30)
+        score -= min(len(warnings) * 5, 20)
+        score -= min(int(round(thermal_proximity_sum * 10.0)), 10)
+        score -= min(int(critical_net_proxy_density // 20), 10)
+        score -= min(len(hs_grouping_violations) * 10, 20)
+        score -= min(len(mount_hole_violations) * 10, 20)
+        score -= min(len(connector_edge_spec_violations) * 10, 20)
+        return max(score, 0)
+
+    def evaluate(self) -> PlacementAnalysis:
+        missing_position, overlaps, outside = self._evaluate_geometry_and_overlaps()
+        connector_edge_violations, checked_connectors = self._evaluate_connectors()
+        decoupling_distance_violations, checked_decoupling_pairs = self._evaluate_decoupling()
+        keepout_violations, checked_keepouts = self._evaluate_keepouts()
+        power_tree_violations, checked_power_tree_refs = self._evaluate_power_tree()
+        sensor_cluster_violations, checked_sensor_cluster_refs = self._evaluate_sensor_clusters()
+        analog_digital_violations, checked_analog_refs, checked_digital_refs = (
+            self._evaluate_analog_digital()
+        )
+        self._evaluate_clustering_and_density()
+        critical_net_proxy_mm, critical_net_proxy_density = self._evaluate_critical_nets()
+        thermal_hotspot_refs, thermal_proximity_sum = self._evaluate_thermal_hotspots()
+        hs_grouping_violations, return_path_warnings, checked_hs_interfaces = (
+            self._evaluate_high_speed()
+        )
+        mount_hole_violations, connector_edge_spec_violations = self._evaluate_mechanical()
+
+        hard_failures: list[str] = []
+        if missing_position:
+            hard_failures.append("Missing positions: " + ", ".join(missing_position[:20]))
+        if overlaps:
+            hard_failures.append("Overlap refs: " + ", ".join(overlaps[:20]))
+        if outside:
+            hard_failures.append("Outside-board refs: " + ", ".join(outside[:20]))
+        hard_failures.extend(connector_edge_violations)
+        hard_failures.extend(decoupling_distance_violations)
+        hard_failures.extend(keepout_violations)
+        hard_failures.extend(power_tree_violations)
+        hard_failures.extend(sensor_cluster_violations)
+        hard_failures.extend(analog_digital_violations)
+        hard_failures.extend(hs_grouping_violations)
+        hard_failures.extend(mount_hole_violations)
+        hard_failures.extend(connector_edge_spec_violations)
+        warnings = list(self.warnings)
+        warnings.extend(return_path_warnings)
+
+        score = self._calculate_score(
+            overlaps=overlaps,
+            outside=outside,
+            connector_edge_violations=connector_edge_violations,
+            decoupling_distance_violations=decoupling_distance_violations,
+            keepout_violations=keepout_violations,
+            power_tree_violations=power_tree_violations,
+            sensor_cluster_violations=sensor_cluster_violations,
+            analog_digital_violations=analog_digital_violations,
+            warnings=warnings,
+            thermal_proximity_sum=thermal_proximity_sum,
+            critical_net_proxy_density=critical_net_proxy_density,
+            hs_grouping_violations=hs_grouping_violations,
+            mount_hole_violations=mount_hole_violations,
+            connector_edge_spec_violations=connector_edge_spec_violations,
+        )
+
+        return PlacementAnalysis(
+            footprint_count=len(self.footprints),
+            board_width_mm=self.board_width_mm,
+            board_height_mm=self.board_height_mm,
+            board_area_mm2=self.board_area_mm2,
+            footprint_area_mm2=self.footprint_area_mm2,
+            density_pct=self.density_pct,
+            score=score,
+            hard_failures=hard_failures,
+            warnings=warnings,
+            checked_connectors=checked_connectors,
+            checked_decoupling_pairs=checked_decoupling_pairs,
+            checked_keepouts=checked_keepouts,
+            checked_power_tree_refs=checked_power_tree_refs,
+            checked_analog_refs=checked_analog_refs,
+            checked_digital_refs=checked_digital_refs,
+            checked_sensor_cluster_refs=checked_sensor_cluster_refs,
+            critical_net_proxy_mm=critical_net_proxy_mm,
+            critical_net_proxy_density=critical_net_proxy_density,
+            checked_thermal_hotspot_refs=len(thermal_hotspot_refs),
+            thermal_proximity_sum=thermal_proximity_sum,
+            checked_hs_interfaces=checked_hs_interfaces,
+            hs_grouping_violations=hs_grouping_violations,
+            return_path_warnings=return_path_warnings,
+            mount_hole_violations=mount_hole_violations,
+            connector_edge_spec_violations=connector_edge_spec_violations,
+        )
+
+
 def _placement_analysis() -> tuple[PlacementAnalysis | None, GateOutcome | None]:
-    from .board_file import (
-        _board_frame_mm,
-        _normalize_board_content,
-        _parse_board_footprint_blocks,
-        _placement_boxes_overlap,
-    )
+    from .board_file import _normalize_board_content, _parse_board_footprint_blocks
     from .design_intent_state import ProjectDesignIntent, resolve_design_intent
 
     try:
@@ -1746,467 +2327,7 @@ def _placement_analysis() -> tuple[PlacementAnalysis | None, GateOutcome | None]
     except ValueError:
         intent = ProjectDesignIntent()
 
-    min_x, min_y, max_x, max_y = _board_frame_mm(content, footprints)
-    frame = (min_x, min_y, max_x, max_y)
-    board_width_mm = max_x - min_x
-    board_height_mm = max_y - min_y
-    board_area_mm2 = max(board_width_mm * board_height_mm, 1.0)
-
-    missing_position = [
-        reference
-        for reference, entry in footprints.items()
-        if entry["x_mm"] is None or entry["y_mm"] is None
-    ]
-    overlaps: list[str] = []
-    outside: list[str] = []
-    connector_edge_violations: list[str] = []
-    decoupling_distance_violations: list[str] = []
-    keepout_violations: list[str] = []
-    power_tree_violations: list[str] = []
-    sensor_cluster_violations: list[str] = []
-    analog_digital_violations: list[str] = []
-    warnings: list[str] = []
-
-    items = sorted(footprints.items())
-    footprint_area_mm2 = sum(
-        float(entry["width_mm"]) * float(entry["height_mm"]) for entry in footprints.values()
-    )
-    density_pct = round((footprint_area_mm2 / board_area_mm2) * 100.0, 2)
-    board_diagonal = math.hypot(board_width_mm, board_height_mm)
-
-    for index, (left_ref, left_entry) in enumerate(items):
-        if left_entry["x_mm"] is None or left_entry["y_mm"] is None:
-            continue
-        left_x = float(left_entry["x_mm"])
-        left_y = float(left_entry["y_mm"])
-        left_w = float(left_entry["width_mm"])
-        left_h = float(left_entry["height_mm"])
-        if (
-            left_x - (left_w / 2) < min_x
-            or left_x + (left_w / 2) > max_x
-            or left_y - (left_h / 2) < min_y
-            or left_y + (left_h / 2) > max_y
-        ):
-            outside.append(left_ref)
-        for right_ref, right_entry in items[index + 1 :]:
-            if right_entry["x_mm"] is None or right_entry["y_mm"] is None:
-                continue
-            if _placement_boxes_overlap(
-                left_x,
-                left_y,
-                left_w,
-                left_h,
-                float(right_entry["x_mm"]),
-                float(right_entry["y_mm"]),
-                float(right_entry["width_mm"]),
-                float(right_entry["height_mm"]),
-                0.0,
-            ):
-                overlaps.append(f"{left_ref}/{right_ref}")
-
-    checked_connectors = 0
-    for reference in intent.connector_refs:
-        entry = footprints.get(reference)
-        if entry is None:
-            connector_edge_violations.append(f"Connector intent ref '{reference}' is missing.")
-            continue
-        checked_connectors += 1
-        distance = _nearest_edge_distance(entry, frame)
-        if distance is None:
-            connector_edge_violations.append(
-                f"Connector '{reference}' has no resolved placement to evaluate."
-            )
-            continue
-        if distance > 5.0:
-            connector_edge_violations.append(
-                f"Connector '{reference}' is {distance:.2f} mm from the nearest edge."
-            )
-
-    checked_decoupling_pairs = 0
-    for pair in intent.decoupling_pairs:
-        ic_entry = footprints.get(pair.ic_ref)
-        if ic_entry is None:
-            decoupling_distance_violations.append(
-                f"Decoupling IC ref '{pair.ic_ref}' is missing on the board."
-            )
-            continue
-        if ic_entry["x_mm"] is None or ic_entry["y_mm"] is None:
-            decoupling_distance_violations.append(
-                f"Decoupling IC ref '{pair.ic_ref}' has no resolved placement."
-            )
-            continue
-        checked_decoupling_pairs += 1
-        cap_distances: list[float] = []
-        missing_caps: list[str] = []
-        for cap_ref in pair.cap_refs:
-            cap_entry = footprints.get(cap_ref)
-            if cap_entry is None:
-                missing_caps.append(cap_ref)
-                continue
-            if cap_entry["x_mm"] is None or cap_entry["y_mm"] is None:
-                missing_caps.append(cap_ref)
-                continue
-            cap_distances.append(
-                math.hypot(
-                    float(ic_entry["x_mm"]) - float(cap_entry["x_mm"]),
-                    float(ic_entry["y_mm"]) - float(cap_entry["y_mm"]),
-                )
-            )
-        if missing_caps:
-            decoupling_distance_violations.append(
-                f"{pair.ic_ref}: missing or unresolved decoupling caps -> "
-                + ", ".join(missing_caps[:12])
-            )
-        if cap_distances and min(cap_distances) > pair.max_distance_mm:
-            decoupling_distance_violations.append(
-                f"{pair.ic_ref}: nearest decoupling cap is {min(cap_distances):.2f} mm away "
-                f"(limit {pair.max_distance_mm:.2f} mm)."
-            )
-
-    checked_keepouts = 0
-    for region in intent.rf_keepout_regions:
-        checked_keepouts += 1
-        for reference, entry in footprints.items():
-            if entry["x_mm"] is None or entry["y_mm"] is None:
-                continue
-            if _placement_boxes_overlap(
-                float(entry["x_mm"]),
-                float(entry["y_mm"]),
-                float(entry["width_mm"]),
-                float(entry["height_mm"]),
-                region.x_mm,
-                region.y_mm,
-                region.w_mm,
-                region.h_mm,
-                0.0,
-            ):
-                keepout_violations.append(f"{reference} overlaps RF keepout '{region.name}'.")
-
-    checked_power_tree_refs = 0
-    present_power_tree: list[str] = []
-    for reference in intent.power_tree_refs:
-        entry = footprints.get(reference)
-        if entry is None:
-            power_tree_violations.append(f"Power-tree intent ref '{reference}' is missing.")
-            continue
-        if _entry_center(entry) is None:
-            power_tree_violations.append(
-                f"Power-tree intent ref '{reference}' has no resolved placement."
-            )
-            continue
-        checked_power_tree_refs += 1
-        present_power_tree.append(reference)
-    for left_ref, right_ref in zip(present_power_tree, present_power_tree[1:], strict=False):
-        left_center = _entry_center(footprints[left_ref])
-        right_center = _entry_center(footprints[right_ref])
-        if left_center is None or right_center is None:
-            continue
-        step_distance = math.hypot(
-            left_center[0] - right_center[0],
-            left_center[1] - right_center[1],
-        )
-        if step_distance > board_diagonal * 0.75:
-            power_tree_violations.append(
-                f"Power-tree step '{left_ref} -> {right_ref}' spans {step_distance:.2f} mm."
-            )
-        elif step_distance > board_diagonal * 0.5:
-            warnings.append(
-                f"Power-tree step '{left_ref} -> {right_ref}' spans {step_distance:.2f} mm."
-            )
-
-    checked_sensor_cluster_refs = 0
-    missing_sensor_refs = [
-        reference
-        for reference in intent.sensor_cluster_refs
-        if reference not in footprints or _entry_center(footprints[reference]) is None
-    ]
-    if missing_sensor_refs:
-        sensor_cluster_violations.append(
-            "Sensor-cluster refs missing or unresolved: " + ", ".join(missing_sensor_refs[:12])
-        )
-    sensor_cluster_spread, present_sensor_refs = _group_spread_mm(
-        intent.sensor_cluster_refs,
-        footprints,
-    )
-    checked_sensor_cluster_refs = len(present_sensor_refs)
-    if checked_sensor_cluster_refs >= 2:
-        if sensor_cluster_spread > board_diagonal * 0.6:
-            sensor_cluster_violations.append(
-                f"Sensor cluster spreads {sensor_cluster_spread:.2f} mm across the board."
-            )
-        elif sensor_cluster_spread > board_diagonal * 0.35:
-            warnings.append(
-                f"Sensor cluster spreads {sensor_cluster_spread:.2f} mm across the board."
-            )
-
-    analog_refs = [
-        reference
-        for reference in intent.analog_refs
-        if reference in footprints and _entry_center(footprints[reference]) is not None
-    ]
-    digital_refs = [
-        reference
-        for reference in intent.digital_refs
-        if reference in footprints and _entry_center(footprints[reference]) is not None
-    ]
-    checked_analog_refs = len(analog_refs)
-    checked_digital_refs = len(digital_refs)
-    nearest_mixed_gap: tuple[float, str, str] | None = None
-    for analog_ref in analog_refs:
-        analog_entry = footprints[analog_ref]
-        for digital_ref in digital_refs:
-            digital_entry = footprints[digital_ref]
-            gap = _bbox_gap_mm(analog_entry, digital_entry)
-            if gap is None:
-                continue
-            candidate = (gap, analog_ref, digital_ref)
-            if nearest_mixed_gap is None or candidate[0] < nearest_mixed_gap[0]:
-                nearest_mixed_gap = candidate
-    if nearest_mixed_gap is not None:
-        gap, analog_ref, digital_ref = nearest_mixed_gap
-        if gap < 1.0:
-            analog_digital_violations.append(
-                "Analog ref "
-                f"'{analog_ref}' is only {gap:.2f} mm away from digital ref "
-                f"'{digital_ref}'."
-            )
-        elif gap < 3.0:
-            warnings.append(
-                "Analog ref "
-                f"'{analog_ref}' is only {gap:.2f} mm away from digital ref "
-                f"'{digital_ref}'."
-            )
-
-    if density_pct > 70.0:
-        warnings.append(f"Footprint density is high ({density_pct:.2f}%).")
-    elif density_pct < 5.0 and len(footprints) >= 6:
-        warnings.append(f"Footprint density is sparse ({density_pct:.2f}%).")
-
-    placed_x = [float(entry["x_mm"]) for entry in footprints.values() if entry["x_mm"] is not None]
-    placed_y = [float(entry["y_mm"]) for entry in footprints.values() if entry["y_mm"] is not None]
-    if len(placed_x) >= 2 and len(placed_y) >= 2:
-        footprint_span_x = max(placed_x) - min(placed_x)
-        footprint_span_y = max(placed_y) - min(placed_y)
-        if len(footprints) >= 6 and (
-            footprint_span_x > board_width_mm * 0.7 or footprint_span_y > board_height_mm * 0.7
-        ):
-            warnings.append("Placement spans most of the board; clustering looks weak.")
-
-    critical_net_proxy_mm = 0.0
-    for net_name in intent.critical_nets:
-        refs = sorted(
-            reference
-            for reference, entry in footprints.items()
-            if net_name in cast(list[str], entry.get("net_names", []))
-            and entry["x_mm"] is not None
-            and entry["y_mm"] is not None
-        )
-        if len(refs) < 2:
-            continue
-        points = [
-            (
-                float(cast(float, footprints[reference]["x_mm"])),
-                float(cast(float, footprints[reference]["y_mm"])),
-            )
-            for reference in refs
-        ]
-        critical_net_proxy_mm += _manhattan_mst_length(points)
-        max_spread = 0.0
-        for index, left_ref in enumerate(refs):
-            left_entry = footprints[left_ref]
-            for right_ref in refs[index + 1 :]:
-                right_entry = footprints[right_ref]
-                max_spread = max(
-                    max_spread,
-                    math.hypot(
-                        float(left_entry["x_mm"]) - float(right_entry["x_mm"]),
-                        float(left_entry["y_mm"]) - float(right_entry["y_mm"]),
-                    ),
-                )
-        if max_spread > board_diagonal * 0.6:
-            warnings.append(
-                f"Critical net '{net_name}' spans {max_spread:.2f} mm across the board."
-            )
-
-    critical_net_proxy_density = round(
-        critical_net_proxy_mm / max(board_area_mm2 / 1000.0, 1.0),
-        2,
-    )
-    if critical_net_proxy_density > 80.0:
-        warnings.append(
-            "Critical nets require a long Manhattan ratsnest relative to board area "
-            f"({critical_net_proxy_density:.2f} mm per 1000 mm^2)."
-        )
-
-    thermal_hotspot_refs = [
-        reference
-        for reference in intent.thermal_hotspots
-        if reference in footprints and _entry_center(footprints[reference]) is not None
-    ]
-    thermal_proximity_sum = 0.0
-    for index, left_ref in enumerate(thermal_hotspot_refs):
-        left_center = _entry_center(footprints[left_ref])
-        if left_center is None:
-            continue
-        for right_ref in thermal_hotspot_refs[index + 1 :]:
-            right_center = _entry_center(footprints[right_ref])
-            if right_center is None:
-                continue
-            distance = max(
-                math.hypot(left_center[0] - right_center[0], left_center[1] - right_center[1]),
-                0.5,
-            )
-            thermal_proximity_sum += 1.0 / distance
-    if thermal_hotspot_refs and thermal_proximity_sum > max(len(thermal_hotspot_refs) - 1, 1) * 0.2:
-        warnings.append(
-            f"Thermal hotspots are clustered tightly (proximity sum {thermal_proximity_sum:.3f})."
-        )
-
-    # ------------------------------------------------------------------
-    # High-speed interface grouping and return-path checks
-    # ------------------------------------------------------------------
-    hs_grouping_violations: list[str] = []
-    return_path_warnings: list[str] = []
-    checked_hs_interfaces = 0
-    for iface in intent.interfaces:
-        present_iface_refs = [r for r in iface.refs if r in footprints]
-        if len(present_iface_refs) < 2:
-            continue
-        checked_hs_interfaces += 1
-        centers = [_entry_center(footprints[r]) for r in present_iface_refs]
-        valid_centers = [c for c in centers if c is not None]
-        if len(valid_centers) < 2:
-            continue
-        # Measure maximum pairwise spread for grouping quality
-        max_iface_spread = 0.0
-        for idx_a, ca in enumerate(valid_centers):
-            for cb in valid_centers[idx_a + 1 :]:
-                d = math.hypot(ca[0] - cb[0], ca[1] - cb[1])
-                if d > max_iface_spread:
-                    max_iface_spread = d
-        limit_hard = board_diagonal * 0.5
-        limit_warn = board_diagonal * 0.3
-        iface_label = f"{iface.kind} ({', '.join(present_iface_refs[:4])})"
-        if max_iface_spread > limit_hard:
-            hs_grouping_violations.append(
-                f"High-speed interface {iface_label} spans {max_iface_spread:.1f} mm "
-                f"(limit {limit_hard:.1f} mm) — return current path will be long."
-            )
-        elif max_iface_spread > limit_warn:
-            return_path_warnings.append(
-                f"High-speed interface {iface_label} spans {max_iface_spread:.1f} mm "
-                f"(warn {limit_warn:.1f} mm) — consider tighter grouping."
-            )
-
-    # ------------------------------------------------------------------
-    # Mechanical constraints: mount-hole clearance and edge-placement specs
-    # ------------------------------------------------------------------
-    mount_hole_violations: list[str] = []
-    connector_edge_spec_violations: list[str] = []
-    mech = intent.mechanical
-    for hole in mech.mount_holes:
-        clearance_mm = max(hole.diameter_mm, 2.0)
-        for reference, entry in footprints.items():
-            center = _entry_center(entry)
-            if center is None:
-                continue
-            dist = math.hypot(center[0] - hole.x_mm, center[1] - hole.y_mm)
-            footprint_radius = math.hypot(
-                float(entry.get("width_mm", 0.0)) / 2,
-                float(entry.get("height_mm", 0.0)) / 2,
-            )
-            if dist < clearance_mm + footprint_radius:
-                mount_hole_violations.append(
-                    f"'{reference}' is {dist:.1f} mm from mount hole at "
-                    f"({hole.x_mm:.1f}, {hole.y_mm:.1f}) — clearance {clearance_mm:.1f} mm "
-                    f"required."
-                )
-    for edge_spec in mech.connector_placement:
-        entry = footprints.get(edge_spec.ref)
-        if entry is None:
-            continue
-        center = _entry_center(entry)
-        if center is None:
-            continue
-        cx, cy = center
-        if edge_spec.edge == "top":
-            dist_to_edge = abs(cy - min_y)
-        elif edge_spec.edge == "bottom":
-            dist_to_edge = abs(cy - max_y)
-        elif edge_spec.edge == "left":
-            dist_to_edge = abs(cx - min_x)
-        else:  # right
-            dist_to_edge = abs(cx - max_x)
-        if dist_to_edge > edge_spec.margin_mm:
-            connector_edge_spec_violations.append(
-                f"Connector '{edge_spec.ref}' is {dist_to_edge:.1f} mm from the "
-                f"{edge_spec.edge} edge (limit {edge_spec.margin_mm:.1f} mm)."
-            )
-
-    hard_failures: list[str] = []
-    if missing_position:
-        hard_failures.append("Missing positions: " + ", ".join(missing_position[:20]))
-    if overlaps:
-        hard_failures.append("Overlap refs: " + ", ".join(overlaps[:20]))
-    if outside:
-        hard_failures.append("Outside-board refs: " + ", ".join(outside[:20]))
-    hard_failures.extend(connector_edge_violations)
-    hard_failures.extend(decoupling_distance_violations)
-    hard_failures.extend(keepout_violations)
-    hard_failures.extend(power_tree_violations)
-    hard_failures.extend(sensor_cluster_violations)
-    hard_failures.extend(analog_digital_violations)
-    hard_failures.extend(hs_grouping_violations)
-    hard_failures.extend(mount_hole_violations)
-    hard_failures.extend(connector_edge_spec_violations)
-    warnings.extend(return_path_warnings)
-
-    score = 100
-    score -= min(len(overlaps) * 20, 40)
-    score -= min(len(outside) * 20, 40)
-    score -= min(len(connector_edge_violations) * 15, 30)
-    score -= min(len(decoupling_distance_violations) * 15, 30)
-    score -= min(len(keepout_violations) * 15, 30)
-    score -= min(len(power_tree_violations) * 15, 30)
-    score -= min(len(sensor_cluster_violations) * 15, 30)
-    score -= min(len(analog_digital_violations) * 15, 30)
-    score -= min(len(warnings) * 5, 20)
-    score -= min(int(round(thermal_proximity_sum * 10.0)), 10)
-    score -= min(int(critical_net_proxy_density // 20), 10)
-    score -= min(len(hs_grouping_violations) * 10, 20)
-    score -= min(len(mount_hole_violations) * 10, 20)
-    score -= min(len(connector_edge_spec_violations) * 10, 20)
-
-    return (
-        PlacementAnalysis(
-            footprint_count=len(footprints),
-            board_width_mm=board_width_mm,
-            board_height_mm=board_height_mm,
-            board_area_mm2=board_area_mm2,
-            footprint_area_mm2=footprint_area_mm2,
-            density_pct=density_pct,
-            score=max(score, 0),
-            hard_failures=hard_failures,
-            warnings=warnings,
-            checked_connectors=checked_connectors,
-            checked_decoupling_pairs=checked_decoupling_pairs,
-            checked_keepouts=checked_keepouts,
-            checked_power_tree_refs=checked_power_tree_refs,
-            checked_analog_refs=checked_analog_refs,
-            checked_digital_refs=checked_digital_refs,
-            checked_sensor_cluster_refs=checked_sensor_cluster_refs,
-            critical_net_proxy_mm=round(critical_net_proxy_mm, 2),
-            critical_net_proxy_density=critical_net_proxy_density,
-            checked_thermal_hotspot_refs=len(thermal_hotspot_refs),
-            thermal_proximity_sum=round(thermal_proximity_sum, 4),
-            checked_hs_interfaces=checked_hs_interfaces,
-            hs_grouping_violations=hs_grouping_violations,
-            return_path_warnings=return_path_warnings,
-            mount_hole_violations=mount_hole_violations,
-            connector_edge_spec_violations=connector_edge_spec_violations,
-        ),
-        None,
-    )
+    return _PlacementEvaluator(content, footprints, intent).evaluate(), None
 
 
 def _format_placement_score(analysis: PlacementAnalysis) -> str:
@@ -3799,16 +3920,57 @@ def _execute_validate_design() -> str:
     return "\n".join(lines)
 
 
-def _register_validation_gate_tools(mcp: FastMCP) -> None:
-    """Register DRC, ERC, and project quality-gate tools."""
+def _pcb_score_placement_impl() -> str:
+    analysis, blocked = _placement_analysis()
+    if blocked is not None:
+        return "\n".join(
+            [
+                "Placement score: BLOCKED",
+                f"- {blocked.summary}",
+                *[f"- {detail}" for detail in blocked.details],
+            ]
+        )
+    if analysis is None:
+        raise RuntimeError(_MISSING_PLACEMENT_ANALYSIS)
+    return _format_placement_score(analysis)
 
-    @mcp.tool()
-    @headless_compatible
-    def run_drc(save_report: bool = False) -> VerdictReport:
-        """Return full DRC report with PCB violations, unconnected items, and courtyard issues."""
-        path, report, error = _run_drc_report("drc_report.json")
-        return _drc_report_payload(path, report, error, save_report=save_report)
 
+def _project_signoff_report_impl(manufacturer: str, tier: str) -> str:
+    from .project import load_design_intent
+    from .signoff import build_signoff_report, render_signoff_report
+
+    outcomes = _evaluate_project_gate(manufacturer=manufacturer or None, tier=tier or None)
+    intent = load_design_intent()
+    release_evidence = _release_evidence_for_active_project()
+    report = build_signoff_report(
+        intent.model_dump(),
+        outcomes,
+        _signoff_provenance(intent),
+        release_evidence if release_evidence.adopted else None,
+    )
+    return render_signoff_report(report)
+
+
+def _project_release_readiness_impl(
+    manufacturer: str,
+    tier: str,
+    output_path: str,
+    export_format: str,
+) -> ProjectReleaseReadinessPayload:
+    payload = _build_project_release_readiness_payload(
+        manufacturer=manufacturer or None,
+        tier=tier or None,
+    )
+    if output_path:
+        payload.exported_report_path = _export_release_readiness_report(
+            payload,
+            output_path=output_path,
+            export_format=export_format,
+        )
+    return payload
+
+
+def _register_schematic_gate_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     @headless_compatible
     def run_erc(save_report: bool = False) -> VerdictReport:
@@ -3818,21 +3980,9 @@ def _register_validation_gate_tools(mcp: FastMCP) -> None:
 
     @mcp.tool()
     @headless_compatible
-    def validate_design() -> str:
-        """Run DRC and ERC and summarize readiness."""
-        return _execute_validate_design()
-
-    @mcp.tool()
-    @headless_compatible
     def schematic_quality_gate() -> VerdictReport:
         """Evaluate whether the schematic is clean enough to proceed."""
         return _gate_report(_evaluate_schematic_gate())
-
-    @mcp.tool()
-    @headless_compatible
-    def pcb_quality_gate() -> VerdictReport:
-        """Evaluate whether the PCB is physically clean enough to proceed."""
-        return _gate_report(_evaluate_pcb_gate())
 
     @mcp.tool()
     @headless_compatible
@@ -3851,6 +4001,27 @@ def _register_validation_gate_tools(mcp: FastMCP) -> None:
         ``run_erc()`` rather than replacing it.
         """
         return _gate_report(_evaluate_schematic_design_rule_gate())
+
+
+def _register_pcb_gate_tools(mcp: FastMCP) -> None:
+    @mcp.tool()
+    @headless_compatible
+    def run_drc(save_report: bool = False) -> VerdictReport:
+        """Return full DRC report with PCB violations, unconnected items, and courtyard issues."""
+        path, report, error = _run_drc_report("drc_report.json")
+        return _drc_report_payload(path, report, error, save_report=save_report)
+
+    @mcp.tool()
+    @headless_compatible
+    def validate_design() -> str:
+        """Run DRC and ERC and summarize readiness."""
+        return _execute_validate_design()
+
+    @mcp.tool()
+    @headless_compatible
+    def pcb_quality_gate() -> VerdictReport:
+        """Evaluate whether the PCB is physically clean enough to proceed."""
+        return _gate_report(_evaluate_pcb_gate())
 
     @mcp.tool()
     @headless_compatible
@@ -3890,6 +4061,8 @@ def _register_validation_gate_tools(mcp: FastMCP) -> None:
             )
         )
 
+
+def _register_project_bundle_gate_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     @headless_compatible
     def project_professional_release_gate(
@@ -3910,18 +4083,7 @@ def _register_validation_gate_tools(mcp: FastMCP) -> None:
     @headless_compatible
     def pcb_score_placement() -> str:
         """Score PCB placement quality and explain both hard failures and softer warnings."""
-        analysis, blocked = _placement_analysis()
-        if blocked is not None:
-            return "\n".join(
-                [
-                    "Placement score: BLOCKED",
-                    f"- {blocked.summary}",
-                    *[f"- {detail}" for detail in blocked.details],
-                ]
-            )
-        if analysis is None:
-            raise RuntimeError(_MISSING_PLACEMENT_ANALYSIS)
-        return _format_placement_score(analysis)
+        return _pcb_score_placement_impl()
 
     @mcp.tool()
     @headless_compatible
@@ -3974,19 +4136,7 @@ def _register_validation_gate_tools(mcp: FastMCP) -> None:
         silent PASS. ``export_manufacturing_package`` is hard-gated on the same
         underlying project gate, so a PASS here means the package will export.
         """
-        from .project import load_design_intent
-        from .signoff import build_signoff_report, render_signoff_report
-
-        outcomes = _evaluate_project_gate(manufacturer=manufacturer or None, tier=tier or None)
-        intent = load_design_intent()
-        release_evidence = _release_evidence_for_active_project()
-        report = build_signoff_report(
-            intent.model_dump(),
-            outcomes,
-            _signoff_provenance(intent),
-            release_evidence if release_evidence.adopted else None,
-        )
-        return render_signoff_report(report)
+        return _project_signoff_report_impl(manufacturer=manufacturer, tier=tier)
 
     @mcp.tool()
     @headless_compatible
@@ -4005,18 +4155,19 @@ def _register_validation_gate_tools(mcp: FastMCP) -> None:
         When ``output_path`` is provided, the bundle is also written as JSON,
         Markdown, HTML, or a print-friendly HTML report (``pdf-ready``).
         """
-
-        payload = _build_project_release_readiness_payload(
-            manufacturer=manufacturer or None,
-            tier=tier or None,
+        return _project_release_readiness_impl(
+            manufacturer=manufacturer,
+            tier=tier,
+            output_path=output_path,
+            export_format=export_format,
         )
-        if output_path:
-            payload.exported_report_path = _export_release_readiness_report(
-                payload,
-                output_path=output_path,
-                export_format=export_format,
-            )
-        return payload
+
+
+def _register_validation_gate_tools(mcp: FastMCP) -> None:
+    """Register DRC, ERC, and project quality-gate tools."""
+    _register_schematic_gate_tools(mcp)
+    _register_pcb_gate_tools(mcp)
+    _register_project_bundle_gate_tools(mcp)
 
 
 def _register_targeted_validation_tools(mcp: FastMCP) -> None:
