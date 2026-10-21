@@ -28,6 +28,41 @@ jobs:
           enable-cache: true
           prune-cache: true
 
+      - name: Check hosted macOS GUI accessibility without changing permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PYACCESS'
+          import json
+          import subprocess
+          from pathlib import Path
+
+          # Non-mutating preflight. Never attempt to bypass macOS TCC.
+          checks = {
+              "trusted": ["swift", "-e", "import ApplicationServices; print(AXIsProcessTrusted())"],
+              "finderAX": [
+                  "osascript", "-e",
+                  'tell application "System Events" to tell application process "Finder" to count windows',
+              ],
+          }
+          results = {}
+          for name, cmd in checks.items():
+              try:
+                  p = subprocess.run(cmd, capture_output=True, text=True, timeout=45, check=False)
+                  result = p.returncode == 0
+                  if name == "trusted":
+                      result = result and p.stdout.strip().lower() == "true"
+                  results[name] = result
+              except (OSError, subprocess.TimeoutExpired):
+                  results[name] = False
+              print(f"macOS accessibility preflight {name}: {'PASS' if results[name] else 'UNAVAILABLE'}")
+          Path("artifacts/kicad-10-0-7-macos").mkdir(parents=True, exist_ok=True)
+          Path("artifacts/kicad-10-0-7-macos/accessibility-preflight.json").write_text(
+              json.dumps(results, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          # Keep the established PCB IPC qualification unchanged.
+          PYACCESS
+
       - name: Prepare bounded fail-closed evidence
         env:
           SOURCE_REVISION: ${{ github.sha }}
@@ -87,17 +122,19 @@ jobs:
           codesign -dv --verbose=2 "$app" 2>&1 | grep -Ei '^Authority=.*KiCad' >/dev/null
           cli=$(find "$app" -name kicad-cli -print -quit)
           pcb=$(find "$mount_dir" -name pcbnew -print -quit)
+          eeschema=$(find "$mount_dir" -name eeschema -print -quit)
           symbol=$(find "$mount_dir" -name Device.kicad_sym -print -quit)
           # The DMG also includes demo-project sym-lib-table files. Never
           # select the first recursive match: it can silently bind an
           # unrelated demo's global library table to our isolated profile.
           template="$app/Contents/SharedSupport/template/sym-lib-table"
-          test -x "$cli" && test -x "$pcb" && test -s "$symbol" && test -s "$template"
+          test -x "$cli" && test -x "$pcb" && test -x "$eeschema" && test -s "$symbol" && test -s "$template"
           test "$("$cli" version)" = '10.0.7'
           printf '%s\n' \
             "KICAD_MAC_MOUNT=$mount_dir" \
             "KICAD_MAC_CLI=$cli" \
             "KICAD_MAC_PCB=$pcb" \
+            "KICAD_MAC_EESCHEMA=$eeschema" \
             "KICAD_MAC_TEMPLATE=$(dirname "$template")" \
             "KICAD_MAC_SYMBOLS=$(dirname "$symbol")" >> "$GITHUB_ENV"
           python3 - <<'PY'
@@ -293,12 +330,20 @@ jobs:
           test "$native_rc" -eq 0 && test "$gui_rc" -eq 0
           test "$(python3 -c 'import json;print(json.load(open("artifacts/kicad-10-0-7-macos/summary.json"))["verdict"])')" = pass
 
+      - name: Require real macOS 10.0.7 Schematic Editor BOM Cancel acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv run --all-extras --frozen python -m scripts.kicad_107_macos_bom_gui             --output artifacts/kicad-10-0-7-macos/bom-gui.json
+
       - name: Upload only bounded summary (never raw GUI logs)
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: kicad-10-0-7-macos-native-gui-ipc
-          path: artifacts/kicad-10-0-7-macos/summary.json
+          path: |
+            artifacts/kicad-10-0-7-macos/summary.json
+            artifacts/kicad-10-0-7-macos/bom-gui.json
           if-no-files-found: error
           retention-days: 7
 
