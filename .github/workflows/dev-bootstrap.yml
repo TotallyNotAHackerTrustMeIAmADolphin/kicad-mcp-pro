@@ -11,6 +11,7 @@ on:
       - pyproject.toml
       - uv.lock
       - Taskfile.yml
+      - scripts/ci/install_kicad_10_0_6_appimage.sh
       - scripts/bootstrap-dev.sh
       - scripts/dev-toolchain.env
       - scripts/dev_environment.py
@@ -30,6 +31,7 @@ on:
       - pyproject.toml
       - uv.lock
       - Taskfile.yml
+      - scripts/ci/install_kicad_10_0_6_appimage.sh
       - scripts/bootstrap-dev.sh
       - scripts/dev-toolchain.env
       - scripts/dev_environment.py
@@ -122,16 +124,7 @@ jobs:
 
       - name: Install KiCad 10.0.6 CLI
         shell: bash
-        run: |
-          set -euo pipefail
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.{list,sources}
-          sudo add-apt-repository -y ppa:kicad/kicad-10.0-releases
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            kicad \
-            kicad-symbols
-          test "$(kicad-cli version)" = "10.0.6"
-          test -f /usr/share/kicad/symbols/Device.kicad_sym
+        run: bash scripts/ci/install_kicad_10_0_6_appimage.sh
 
       - name: Bootstrap exact core toolchain
         shell: bash
