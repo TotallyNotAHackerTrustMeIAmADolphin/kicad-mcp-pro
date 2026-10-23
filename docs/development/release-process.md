@@ -36,6 +36,12 @@ This keeps protected PR review and CI as the publication approval boundary;
 merging a release PR is an intentional authorization to publish once those
 checks succeed.
 
+Today Release Please publishes each GitHub Release before the publishers
+attach their assets, and the publishers upload with `--clobber`. This is not
+compatible with immutable GitHub Releases. The step-by-step map, the
+`release_asset_mutations` ratchet and the proposed draft-first design are in
+[Release asset immutability](release-asset-immutability.md) (#1179).
+
 For recovery only, an authorized maintainer can still use **Actions → Publish
 Release → Run workflow**, selecting `main`. The automatic and manual paths
 share a serialized concurrency group; Release Please's released-version

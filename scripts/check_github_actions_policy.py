@@ -10,6 +10,13 @@ from typing import cast
 
 import yaml
 
+try:
+    from scripts.check_release_asset_mutations import inventory as release_mutation_inventory
+    from scripts.check_release_asset_mutations import validate as validate_release_mutations
+except ModuleNotFoundError:  # Direct `python scripts/foo.py` execution.
+    from check_release_asset_mutations import inventory as release_mutation_inventory
+    from check_release_asset_mutations import validate as validate_release_mutations
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _GITHUB_DIRECTORY = ".github"
 DEFAULT_POLICY = REPO_ROOT / _GITHUB_DIRECTORY / "actions-policy.json"
@@ -240,6 +247,13 @@ def validate_repository(root: Path, policy: dict[str, object]) -> list[str]:
             "third-party Actions allowlist is stale: "
             f"used={sorted(actual_third_party)!r} allowed={sorted(allowed_repositories)!r}"
         )
+
+    # #1179: ratchet steps that mutate an already-published GitHub Release.
+    errors.extend(
+        validate_release_mutations(
+            release_mutation_inventory(root), policy.get("release_asset_mutations", [])
+        )
+    )
 
     codeowners_path = root / _GITHUB_DIRECTORY / "CODEOWNERS"
     codeowners = {

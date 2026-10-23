@@ -72,6 +72,10 @@ corepack pnpm run workflows:security
 ```
 
 The policy check fails when a workflow gains an undeclared write scope, uses an unapproved Action repository, references a mutable Action tag, omits the read-only workflow baseline, or removes a protected CODEOWNERS rule.
+It also fails when a step creates a non-draft GitHub Release or changes the
+assets of a published release without a matching `release_asset_mutations`
+entry, or when such an entry is stale. See
+[Release asset immutability](../development/release-asset-immutability.md).
 
 ## Rollback
 

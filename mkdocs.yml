@@ -190,6 +190,7 @@ nav:
       - Dependency Management: development/dependency-management.md
       - Commit Conventions: development/commit-conventions.md
       - Release Process: development/release-process.md
+      - Release Asset Immutability: development/release-asset-immutability.md
       - Installation Policy: development/installation-policy.md
       - Dependency Audit: development/dependency-audit-2026-06.md
       - Architecture: development/architecture.md

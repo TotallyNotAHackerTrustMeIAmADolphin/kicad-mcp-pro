@@ -141,6 +141,49 @@ jobs:
     assert any("write-permission matrix differs" in error for error in errors)
 
 
+_RELEASE_UPLOAD_WORKFLOW = """name: release
+on: push
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Attach evidence
+        run: gh release upload "$TAG" evidence.json --clobber
+"""
+
+
+def test_policy_rejects_unlisted_release_asset_mutation(tmp_path: Path) -> None:
+    _write_fixture(tmp_path, _RELEASE_UPLOAD_WORKFLOW)
+
+    # A policy without the key falls back to an empty allowlist (fail closed).
+    errors = validate_repository(tmp_path, _baseline_policy())
+
+    assert any("test.yml:test:Attach evidence" in error and "#1179" in error for error in errors)
+
+
+def test_policy_accepts_allowlisted_release_asset_mutation(tmp_path: Path) -> None:
+    _write_fixture(tmp_path, _RELEASE_UPLOAD_WORKFLOW)
+    policy = _baseline_policy()
+    policy["release_asset_mutations"] = [
+        {
+            "workflow": "test.yml",
+            "job": "test",
+            "step": "Attach evidence",
+            "kind": "upload_asset",
+            "clobber": True,
+            "issue": "#1179",
+            "reason": "Fixture legacy upload.",
+        }
+    ]
+
+    errors = validate_repository(tmp_path, policy)
+
+    assert not any("release_asset_mutations" in error for error in errors)
+    assert not any("GitHub Release" in error for error in errors)
+
+
 def test_load_policy_rejects_file_outside_repository(tmp_path: Path) -> None:
     external_policy = tmp_path / "actions-policy.json"
     external_policy.write_text("{}\n", encoding="utf-8")

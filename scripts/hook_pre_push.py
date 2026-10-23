@@ -111,6 +111,7 @@ _METADATA_TRIGGERS = {
 
 _WORKFLOW_FILES = {
     "scripts/check_github_actions_policy.py",
+    "scripts/check_release_asset_mutations.py",
     "scripts/check_workflows.py",
     "scripts/workflow_security.py",
 }

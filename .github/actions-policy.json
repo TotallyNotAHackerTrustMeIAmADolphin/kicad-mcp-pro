@@ -164,5 +164,88 @@
     "ghcr": {
       "required_reviewers": []
     }
-  }
+  },
+  "release_asset_mutations": [
+    {
+      "workflow": "publish-release.yml",
+      "job": "publish",
+      "step": "Publish merged Release Please versions",
+      "kind": "create_release",
+      "clobber": false,
+      "issue": "#1179",
+      "reason": "release-please-action (skip-github-release: false) creates published, non-draft releases and tags before any family attaches assets; the target is a draft release published only after asset inventory verification."
+    },
+    {
+      "workflow": "publish-python.yml",
+      "job": "build",
+      "step": "Attach Python evidence to GitHub Release",
+      "kind": "upload_asset",
+      "clobber": true,
+      "issue": "#1179",
+      "reason": "Python wheel/sdist, SHA256SUMS, SBOM and release evidence are uploaded with --clobber after Release Please has already published the mcp-server release."
+    },
+    {
+      "workflow": "publish-npm.yml",
+      "job": "publish",
+      "step": "Attach npm evidence to GitHub Release",
+      "kind": "upload_asset",
+      "clobber": true,
+      "issue": "#1179",
+      "reason": "npm launcher tarball, SHA256SUMS and SBOM are uploaded with --clobber from a release:published run."
+    },
+    {
+      "workflow": "publish-npm.yml",
+      "job": "publish",
+      "step": "Attach npm post-publish verification to GitHub Release",
+      "kind": "upload_asset",
+      "clobber": true,
+      "issue": "#1179",
+      "reason": "npm-published-digest.json is produced after npm publish and uploaded with --clobber onto the published release; it must move to attestations/workflow artifacts or run before release publication."
+    },
+    {
+      "workflow": "publish-mcpb.yml",
+      "job": "publish",
+      "step": "Attach MCPB bundle and evidence to GitHub Release",
+      "kind": "upload_asset",
+      "clobber": true,
+      "issue": "#1179",
+      "reason": "MCPB bundle and evidence are uploaded with --clobber from a release:published run."
+    },
+    {
+      "workflow": "publish-protocol-schemas.yml",
+      "job": "publish",
+      "step": "Attach evidence to GitHub Release",
+      "kind": "upload_asset",
+      "clobber": true,
+      "issue": "#1179",
+      "reason": "Protocol schemas tarball, SHA256SUMS and SBOM are uploaded with --clobber from a release:published run."
+    },
+    {
+      "workflow": "publish-kicad-pcm.yml",
+      "job": "publish",
+      "step": "Attach KiCad PCM package and evidence to GitHub Release",
+      "kind": "upload_asset",
+      "clobber": true,
+      "issue": "#1179",
+      "reason": "KiCad PCM package and evidence are uploaded with --clobber from a release:published run."
+    },
+    {
+      "workflow": "gui-release.yml",
+      "job": "create-release",
+      "step": "Prepare release inventory",
+      "kind": "create_release",
+      "clobber": false,
+      "issue": "#1179",
+      "reason": "Creates a non-draft GUI release with gh release create when Publish Release has not created it yet (race with Release Please); draft-first orchestration removes this path."
+    },
+    {
+      "workflow": "gui-release.yml",
+      "job": "create-release",
+      "step": "Upload installers and evidence to GitHub Release",
+      "kind": "upload_asset",
+      "clobber": true,
+      "issue": "#1179",
+      "reason": "GUI installers and evidence are uploaded with --clobber onto an already published kicad-mcp-gui release."
+    }
+  ]
 }
