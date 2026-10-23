@@ -23,6 +23,7 @@ from kicad_mcp.tools.schematic import (
     _extract_uuid,
     _extract_wires,
     _functional_zone_origin,
+    _generated_netlist_symbol_position,
     _get_symbol_bboxes,
     _has_point,
     _insert_junctions_for_batch,
@@ -204,7 +205,22 @@ def test_position_netlist_powers_preserves_gnd_and_rail_placement() -> None:
     assert all(_has_point(power) for power in powers)
     assert float(powers[0]["y_mm"]) > 50.0
     assert float(powers[1]["y_mm"]) < 50.0
-    assert (powers[2]["x_mm"], powers[2]["y_mm"]) == _netlist_layout_point(2)
+    expected_orphan_position = _netlist_layout_point(2)
+    actual_orphan_position = (powers[2]["x_mm"], powers[2]["y_mm"])
+    assert actual_orphan_position == expected_orphan_position
+
+
+def test_generated_netlist_symbol_position_preserves_offset_and_grid_snap() -> None:
+    assert _generated_netlist_symbol_position(50.8, 76.2, None) == (50.8, 76.2)
+    from kicad_mcp.tools import schematic
+
+    extent = (-3.81, -1.27, 6.35, 3.81)
+    expected = schematic._snap_point(
+        50.8 + 3.81 + schematic._NETLIST_LABEL_MARGIN_W_MM / 2.0,
+        76.2 + 1.27 + schematic._NETLIST_LABEL_MARGIN_H_MM / 2.0,
+        True,
+    )
+    assert _generated_netlist_symbol_position(50.8, 76.2, extent) == expected
 
 
 def test_schematic_netlist_helpers_layout_missing_terminals() -> None:
