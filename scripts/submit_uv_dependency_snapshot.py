@@ -25,25 +25,65 @@ def _pypi_name(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def _name_from_key(key: str) -> str:
+    return key.partition("@")[0]
+
+
+def _is_pypi_package(package: dict[str, Any]) -> bool:
+    registry: object = package.get("source", {}).get("registry", "")
+    return isinstance(registry, str) and registry.startswith(PYPI_REGISTRY)
+
+
+def _indexed_pypi_versions(packages: list[dict[str, Any]]) -> dict[str, set[str]]:
+    by_name: dict[str, set[str]] = defaultdict(set)
+    for package in packages:
+        if not _is_pypi_package(package):
+            continue
+        name = _pypi_name(package["name"])
+        version = package["version"]
+        if version in by_name[name]:
+            raise ValueError("Duplicate PyPI name/version resolution in uv.lock")
+        by_name[name].add(version)
+    return by_name
+
+
+def _locked_variant_key(
+    versions_by_name: dict[str, set[str]], name: str, version: str | None
+) -> str:
+    available = versions_by_name.get(name, set())
+    if not available:
+        return name
+    if len(available) == 1:
+        if version is not None and version not in available:
+            raise ValueError("Dependency version does not match lockfile")
+        return name
+    if version is None or version not in available:
+        raise ValueError("Ambiguous dependency requires explicit locked version")
+    return f"{name}@{version}"
+
+
 def _locked_package_graph(
     packages: list[dict[str, Any]],
 ) -> tuple[dict[str, str], dict[str, set[str]]]:
+    """Keep all Python/platform-specific versions as distinct dependency PURLs.
+
+    A dependency that can resolve to several versions must carry an explicit
+    lockfile version. Never silently pick one variant.
+    """
+    by_name = _indexed_pypi_versions(packages)
     versions: dict[str, str] = {}
     children: dict[str, set[str]] = defaultdict(set)
-    registered_count = 0
     for package in packages:
         name = _pypi_name(package["name"])
-        if package.get("source", {}).get("registry", "").startswith(PYPI_REGISTRY):
-            registered_count += 1
-            if name in versions:
-                raise ValueError(
-                    "Multiple versions of a package require explicit PURL disambiguation"
-                )
-            versions[name] = package["version"]
-        children[name].update(
-            _pypi_name(dependency["name"]) for dependency in package.get("dependencies", [])
+        registry = _is_pypi_package(package)
+        parent = _locked_variant_key(by_name, name, package["version"] if registry else None)
+        if registry:
+            versions[parent] = package["version"]
+        children[parent].update(
+            _locked_variant_key(by_name, _pypi_name(dep["name"]), dep.get("version"))
+            for dep in package.get("dependencies", [])
         )
-    if len(versions) != registered_count:
+    if len(versions) != sum(len(items) for items in by_name.values()):
         raise ValueError("Incomplete PyPI package resolution")
     return versions, children
 
@@ -81,11 +121,13 @@ def _resolved_packages(
     resolved: dict[str, dict[str, Any]] = {}
     for name, version in sorted(versions.items()):
         resolved[name] = {
-            "package_url": f"pkg:pypi/{name}@{version}",
+            "package_url": f"pkg:pypi/{_name_from_key(name)}@{version}",
             "relationship": "direct" if name in direct else "indirect",
             "scope": "runtime" if name in runtime else "development",
             "dependencies": sorted(
-                f"pkg:pypi/{child}@{versions[child]}" for child in edges[name] if child in versions
+                f"pkg:pypi/{_name_from_key(child)}@{versions[child]}"
+                for child in edges[name]
+                if child in versions
             ),
         }
     if not resolved:
@@ -112,10 +154,16 @@ def build_snapshot(
     packages = tomllib.loads(LOCK_PATH.read_text(encoding="utf-8"))["package"]
     versions, edges = _locked_package_graph(packages)
     runtime_roots, direct = _direct_roots(packages)
-    if not runtime_roots.issubset(versions):
+
+    # Direct root names select every platform-specific resolution variant.
+    def expand(names: set[str]) -> set[str]:
+        return {key for key in versions if _name_from_key(key) in names}
+
+    resolved_roots = expand(runtime_roots)
+    if {_name_from_key(key) for key in resolved_roots} != runtime_roots:
         raise ValueError("Missing locked runtime dependencies")
-    runtime = _reachable_runtime(runtime_roots, edges)
-    resolved = _resolved_packages(versions, edges, direct, runtime)
+    runtime = _reachable_runtime(resolved_roots, edges)
+    resolved = _resolved_packages(versions, edges, expand(direct), runtime)
     return {
         "version": 0,
         "sha": sha,
