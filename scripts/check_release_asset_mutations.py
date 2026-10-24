@@ -256,6 +256,7 @@ class _Match:
     clobber: bool
     draft: bool | None
     command: str
+    tag: str | None = None
 
 
 def _classify_segment(segment: str) -> _Match | None:
@@ -268,7 +269,8 @@ def _classify_segment(segment: str) -> _Match | None:
         if kind is None:
             return None
         rest = tokens[3:]
-        return _Match(kind, "--clobber" in rest, _draft_flag(rest), segment)
+        tag = rest[0] if rest and not rest[0].startswith("-") else None
+        return _Match(kind, "--clobber" in rest, _draft_flag(rest), segment, tag)
     if program == "gh" and tokens[1] == "api":
         rest = tokens[2:]
         if not any("releases" in token for token in rest):
@@ -304,7 +306,60 @@ def _truthy(value: object) -> bool:
     return str(value).strip().lower() == "true"
 
 
-def _classify_action(step: Mapping[str, object]) -> _Match | None:
+def _release_please_config(root: Path, inputs: Mapping[str, object]) -> dict[str, object] | None:
+    """Read only the trusted checkout manifest, never a remote/unknown source."""
+    # The action may select another repository, branch or release strategy:
+    # local config cannot certify what that invocation will actually use.
+    if any(
+        inputs.get(name) not in (None, "") for name in ("repo-url", "target-branch", "release-type")
+    ):
+        return None
+    raw = inputs.get("config-file", "release-please-config.json")
+    if not isinstance(raw, str) or not raw:
+        return None
+    path = Path(raw)
+    if path.is_absolute() or any(part in {".", ".."} for part in path.parts):
+        return None
+    try:
+        repo = root.resolve(strict=True)
+        local = (repo / path).resolve(strict=True)
+        local.relative_to(repo)
+        config = json.loads(local.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return config if isinstance(config, dict) else None
+
+
+def _release_package_is_draft(package: object, config: Mapping[str, object]) -> bool:
+    if not isinstance(package, dict):
+        return False
+    if package.get("skip-github-release", config.get("skip-github-release")) is True:
+        return True
+    return (
+        package.get("draft", config.get("draft")) is True
+        and package.get("force-tag-creation", config.get("force-tag-creation")) is True
+    )
+
+
+def _release_please_is_draft(root: Path, inputs: Mapping[str, object]) -> bool:
+    """Recognize only a fully tag-safe, all-packages draft configuration."""
+    config = _release_please_config(root, inputs)
+    if config is None:
+        return False
+    packages = config.get("packages")
+    if not isinstance(packages, dict) or not packages:
+        return False
+    creates_release = any(
+        isinstance(package, dict)
+        and package.get("skip-github-release", config.get("skip-github-release")) is not True
+        for package in packages.values()
+    )
+    return creates_release and all(
+        _release_package_is_draft(package, config) for package in packages.values()
+    )
+
+
+def _classify_action(step: Mapping[str, object], *, root: Path | None = None) -> _Match | None:
     uses = step.get("uses")
     if not isinstance(uses, str):
         return None
@@ -316,7 +371,8 @@ def _classify_action(step: Mapping[str, object]) -> _Match | None:
     if action == "googleapis/release-please-action":
         if _truthy(inputs.get("skip-github-release", False)):
             return None
-        return _Match("create_release", False, None, uses)
+        draft = _release_please_is_draft(root, inputs) if root is not None else False
+        return _Match("create_release", False, draft, uses)
     draft = _truthy(inputs.get("draft", False))
     return _Match("create_release", False, draft, uses)
 
@@ -329,9 +385,9 @@ def _step_label(step: Mapping[str, object], index: int) -> str:
     return f"#{index}"
 
 
-def _step_matches(step: Mapping[str, object]) -> list[_Match]:
+def _step_matches(step: Mapping[str, object], root: Path | None = None) -> list[_Match]:
     matches: list[_Match] = []
-    action_match = _classify_action(step)
+    action_match = _classify_action(step, root=root)
     if action_match is not None:
         matches.append(action_match)
     run = step.get("run")
@@ -343,37 +399,54 @@ def _step_matches(step: Mapping[str, object]) -> list[_Match]:
     return matches
 
 
-def _job_inventory(workflow: str, job: str, steps: Iterable[object]) -> list[ReleaseMutation]:
+def _literal_release_tag(tag: str | None) -> bool:
+    return tag is not None and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tag) is not None
+
+
+def _draft_target(match: _Match, draft_tag: str | None) -> tuple[str, str | None]:
+    if match.kind == "create_release":
+        draft = bool(match.draft)
+        tag = match.tag if draft and _literal_release_tag(match.tag) else None
+        return ("draft" if draft else "published", tag)
+    if (
+        draft_tag
+        and match.tag == draft_tag
+        and match.kind
+        in {
+            "upload_asset",
+            "edit_release",
+            "delete_asset",
+        }
+    ):
+        if match.kind == "edit_release" and match.draft is False:
+            return "draft", None
+        return "draft", draft_tag
+    # Cross-tag, expression, API write, or another release resets ownership.
+    return "published", None
+
+
+def _job_inventory(
+    workflow: str, job: str, steps: Iterable[object], root: Path | None = None
+) -> list[ReleaseMutation]:
     """Record every release write in a job, in order, with its draft/published target.
 
-    The draft window opens only on a ``--draft`` create in this job. It stays
-    open for uploads, asset deletions and edits that keep the draft, and closes
-    (fail closed) on ``--draft=false`` and on any other write whose effect on
-    the draft state is not positively known, such as ``gh api``/``curl``
-    writes. Every command is recorded, so repeated commands in one step are
-    counted rather than collapsed.
+    A draft window is allowed only for a literal tag passed to a draft
+    creation command. Following asset operations must use exactly that same
+    literal tag. Unknown tags, other release targets, API writes, and
+    publication close the inferred draft window. Every matched command is
+    recorded individually.
+
     """
 
     entries: list[ReleaseMutation] = []
-    draft_open = False
+    draft_tag: str | None = None
     for index, step in enumerate(steps, start=1):
         if not isinstance(step, dict):
             continue
         label = _step_label(step, index)
-        for match in _step_matches(step):
+        for match in _step_matches(step, root):
             draft = bool(match.draft)
-            if match.kind == "create_release":
-                target = "draft" if draft else "published"
-                draft_open = draft
-            elif draft_open:
-                target = "draft"
-                if match.kind == "edit_release":
-                    if match.draft is False:
-                        draft_open = False
-                elif match.kind not in {"upload_asset", "delete_asset"}:
-                    draft_open = False
-            else:
-                target = "published"
+            target, draft_tag = _draft_target(match, draft_tag)
             entry = ReleaseMutation(
                 workflow=workflow,
                 job=job,
@@ -408,7 +481,7 @@ def inventory(root: Path) -> list[ReleaseMutation]:
                 continue
             steps = job.get("steps")
             if isinstance(steps, list):
-                entries.extend(_job_inventory(path.name, str(job_name), steps))
+                entries.extend(_job_inventory(path.name, str(job_name), steps, root))
     return entries
 
 
@@ -476,6 +549,11 @@ def validate(entries: Iterable[ReleaseMutation], allowlist: object) -> list[str]
     matched: dict[_Key, int] = {}
     for entry in entries:
         if entry.target_state != "published":
+            if entry.kind == "upload_asset" and entry.clobber:
+                errors.append(
+                    f"{entry.location}: draft asset uploads must never use --clobber "
+                    f"({ISSUE}); preserve existing assets or fail closed."
+                )
             continue
         if entry.key in allowed:
             matched[entry.key] = matched.get(entry.key, 0) + 1

@@ -71,8 +71,9 @@ def test_doc_names_every_release_workflow(workflow: str) -> None:
         "scripts/check_release_asset_mutations.py",
         "release_asset_mutations",
         "repository immutability setting is not changed",
-        "Its entry is not retired",
-        "Draft state is tracked only within one job.",
+        "release-creation mutation remains allowlisted",
+        "force-tag-creation",
+        "literal tag",
     ],
 )
 def test_doc_mentions_required_concepts(phrase: str) -> None:

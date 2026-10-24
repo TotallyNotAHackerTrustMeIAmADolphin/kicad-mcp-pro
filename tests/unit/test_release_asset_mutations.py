@@ -180,11 +180,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Create draft release
-        run: gh release create "$TAG" --draft --verify-tag --title "$TAG"
+        run: gh release create v1 --draft --verify-tag --title v1
       - name: Attach assets to draft
-        run: gh release upload "$TAG" dist/*
+        run: gh release upload v1 dist/*
       - name: Publish draft
-        run: gh release edit "$TAG" --draft=false
+        run: gh release edit v1 --draft=false
 """,
     )
 
@@ -209,10 +209,10 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - run: gh release create "$TAG" --draft
-      - run: gh release edit "$TAG" --draft=false
+      - run: gh release create v1 --draft
+      - run: gh release edit v1 --draft=false
       - name: Late evidence
-        run: gh release upload "$TAG" late.json
+        run: gh release upload v1 late.json
 """,
     )
 
@@ -508,13 +508,13 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - run: gh release create "$TAG" --draft
+      - run: gh release create v1 --draft
       - name: s
-        run: gh release upload "$TAG" a
+        run: gh release upload v1 a
       - name: p
-        run: gh release edit "$TAG" --draft=false
+        run: gh release edit v1 --draft=false
       - name: s
-        run: gh release upload "$TAG" b
+        run: gh release upload v1 b
 """,
     )
 
@@ -546,23 +546,24 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - run: gh release create "$TAG" --draft
+      - run: gh release create v1 --draft
       - name: Publish via API
         run: {json.dumps(publish)}
       - name: Late evidence
-        run: gh release upload "$TAG" x --clobber
+        run: gh release upload v1 x --clobber
 """,
     )
 
     entries = inventory(tmp_path)
 
     assert [(entry.step, entry.kind, entry.target_state) for entry in entries][1:] == [
-        ("Publish via API", "api_write", "draft"),
+        ("Publish via API", "api_write", "published"),
         ("Late evidence", "upload_asset", "published"),
     ]
     errors = validate(entries, [])
-    assert len(errors) == 1
-    assert "Late evidence" in errors[0]
+    assert len(errors) == 2
+    assert "Publish via API" in errors[0]
+    assert "Late evidence" in errors[1]
 
 
 @pytest.mark.parametrize(
@@ -654,18 +655,16 @@ def test_curl_upload_requires_uploads_host_not_substring(tmp_path: Path) -> None
 @pytest.mark.parametrize(
     "publish",
     [
-        'gh release edit "$TAG" --draft=0',
-        'gh release edit "$TAG" --draft=False',
-        'gh release edit "$TAG" --draft="$PUBLISH"',
-        'gh release edit "$TAG" --draft=${{ inputs.draft }}',
+        "gh release edit v1 --draft=0",
+        "gh release edit v1 --draft=False",
+        'gh release edit v1 --draft="$PUBLISH"',
+        "gh release edit v1 --draft=${{ inputs.draft }}",
     ],
 )
 def test_unrecognised_draft_value_closes_the_draft_window(tmp_path: Path, publish: str) -> None:
     _write_workflow(
         tmp_path,
-        _single_step_workflow(
-            f'gh release create "$TAG" --draft\n{publish}\ngh release upload "$TAG" x'
-        ),
+        _single_step_workflow(f"gh release create v1 --draft\n{publish}\ngh release upload v1 x"),
     )
 
     entries = inventory(tmp_path)
@@ -705,3 +704,276 @@ def test_wrapper_environment_assignment_remains_ascii_only(value: str, expected:
 )
 def test_policy_issue_reference_remains_ascii_only(value: str, expected: bool) -> None:
     assert (_ISSUE_REF.fullmatch(value) is not None) is expected
+
+
+def _release_please_fixture(
+    root: Path,
+    config: object,
+    *,
+    config_file: str = "release-please-config.json",
+    skip_release: str = "false",
+) -> None:
+    (root / "release-please-config.json").write_text(json.dumps(config), encoding="utf-8")
+    _write_workflow(
+        root,
+        f"""name: Draft release fixture
+on: push
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release Please
+        uses: googleapis/release-please-action@{"a" * 40}
+        with:
+          config-file: {config_file}
+          skip-github-release: {skip_release}
+""",
+    )
+
+
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [
+        ({"draft": True, "force-tag-creation": True, "packages": {".": {}}}, "draft"),
+        (
+            {
+                "draft": True,
+                "force-tag-creation": True,
+                "packages": {".": {}, "packages/npm": {"draft": True}},
+            },
+            "draft",
+        ),
+        (
+            {
+                "packages": {
+                    ".": {"draft": True, "force-tag-creation": True},
+                    "packages/npm": {"draft": True, "force-tag-creation": True},
+                }
+            },
+            "draft",
+        ),
+        ({"draft": True, "packages": {".": {}}}, "published"),
+        ({"draft": True, "force-tag-creation": False, "packages": {".": {}}}, "published"),
+        (
+            {
+                "draft": True,
+                "force-tag-creation": True,
+                "packages": {".": {}, "packages/npm": {"draft": False}},
+            },
+            "published",
+        ),
+        (
+            {
+                "draft": True,
+                "force-tag-creation": True,
+                "packages": {".": {}, "packages/npm": {"force-tag-creation": False}},
+            },
+            "published",
+        ),
+        ({"draft": True, "force-tag-creation": True, "packages": {}}, "published"),
+        (
+            {"draft": True, "force-tag-creation": True, "packages": {".": "invalid"}},
+            "published",
+        ),
+        (
+            {
+                "draft": True,
+                "force-tag-creation": True,
+                "packages": {".": {"skip-github-release": True}},
+            },
+            "published",
+        ),
+    ],
+)
+def test_release_please_manifest_draft_requires_all_package_tags(
+    tmp_path: Path, config: object, expected: str
+) -> None:
+    _release_please_fixture(tmp_path, config)
+    entries = inventory(tmp_path)
+    assert len(entries) == 1
+    assert entries[0].kind == "create_release"
+    assert entries[0].target_state == expected
+    assert (validate(entries, []) == []) is (expected == "draft")
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    ["../foreign.json", "/not-authorized/foreign.json", "$GHA_CONFIG"],
+)
+def test_release_please_manifest_path_untrusted_is_not_a_draft(
+    tmp_path: Path, config_path: str
+) -> None:
+    valid = {"draft": True, "force-tag-creation": True, "packages": {".": {}}}
+    _release_please_fixture(tmp_path, valid, config_file=config_path)
+    entries = inventory(tmp_path)
+    assert entries[0].target_state == "published"
+    assert len(validate(entries, [])) == 1
+
+
+def test_release_please_manifest_invalid_json_is_not_draft(tmp_path: Path) -> None:
+    valid = {"draft": True, "force-tag-creation": True, "packages": {".": {}}}
+    _release_please_fixture(tmp_path, valid)
+    (tmp_path / "release-please-config.json").write_text("{", encoding="utf-8")
+    entries = inventory(tmp_path)
+    assert entries[0].target_state == "published"
+
+
+def test_release_please_manifest_path_symlink_cannot_escape(tmp_path: Path) -> None:
+    valid = {"draft": True, "force-tag-creation": True, "packages": {".": {}}}
+    external = tmp_path.parent / f"{tmp_path.name}-outside.json"
+    external.write_text(json.dumps(valid), encoding="utf-8")
+    (tmp_path / "release-please-config.json").symlink_to(external)
+    _write_workflow(
+        tmp_path,
+        f"""name: fixture
+on: push
+jobs:
+  publish:
+    steps:
+      - uses: googleapis/release-please-action@{"a" * 40}
+        with:
+          skip-github-release: false
+""",
+    )
+    entries = inventory(tmp_path)
+    assert entries[0].target_state == "published"
+
+
+def test_skipped_release_please_step_creates_no_release_even_if_draft(tmp_path: Path) -> None:
+    valid = {"draft": True, "force-tag-creation": True, "packages": {".": {}}}
+    _release_please_fixture(tmp_path, valid, skip_release="true")
+    assert inventory(tmp_path) == []
+
+
+def test_draft_upload_with_clobber_is_rejected(tmp_path: Path) -> None:
+    _write_workflow(
+        tmp_path,
+        """name: fixture
+on: push
+jobs:
+  publish:
+    steps:
+      - run: gh release create v1 --draft
+      - name: Dangerous draft replacement
+        run: gh release upload v1 x.tgz --clobber
+""",
+    )
+    entries = inventory(tmp_path)
+    assert entries[-1].target_state == "draft"
+    errors = validate(entries, [])
+    assert len(errors) == 1
+    assert "never use --clobber" in errors[0]
+
+
+def test_draft_create_and_safe_upload_across_config_and_job_is_not_inferred(
+    tmp_path: Path,
+) -> None:
+    """Release Please draft action does not confer cross-job draft upload safety."""
+    valid = {"draft": True, "force-tag-creation": True, "packages": {".": {}}}
+    _release_please_fixture(tmp_path, valid)
+    path = tmp_path / ".github" / "workflows" / "test.yml"
+    source = path.read_text()
+    source += """
+  attach:
+    needs: publish
+    steps:
+      - run: gh release upload "$TAG" x.tgz
+"""
+    path.write_text(source, encoding="utf-8")
+    entries = inventory(tmp_path)
+    assert [(x.kind, x.target_state) for x in entries] == [
+        ("create_release", "draft"),
+        ("upload_asset", "published"),
+    ]
+    assert len(validate(entries, [])) == 1
+
+
+@pytest.mark.parametrize(
+    "alternative",
+    [
+        "repo-url: other-owner/other-repo",
+        "repo-url: $GITHUB_REPOSITORY",
+        "target-branch: another-branch",
+        "target-branch: $GITHUB_REF",
+        "release-type: node",
+    ],
+)
+def test_release_please_unknown_effective_configuration_fails_closed(
+    tmp_path: Path, alternative: str
+) -> None:
+    valid = {"draft": True, "force-tag-creation": True, "packages": {".": {}}}
+    _release_please_fixture(tmp_path, valid)
+    path = tmp_path / ".github" / "workflows" / "test.yml"
+    path.write_text(path.read_text() + f"          {alternative}\n", encoding="utf-8")
+    entries = inventory(tmp_path)
+    assert len(entries) == 1
+    assert entries[0].target_state == "published"
+    assert len(validate(entries, [])) == 1
+
+
+def test_release_please_multifamily_draft_does_not_open_unknown_tag_window(
+    tmp_path: Path,
+) -> None:
+    valid = {"draft": True, "force-tag-creation": True, "packages": {".": {}}}
+    _release_please_fixture(tmp_path, valid)
+    path = tmp_path / ".github" / "workflows" / "test.yml"
+    path.write_text(
+        path.read_text() + "      - run: gh release upload v1.0.0 x.tgz\n",
+        encoding="utf-8",
+    )
+    entries = inventory(tmp_path)
+    assert [(x.kind, x.target_state) for x in entries] == [
+        ("create_release", "draft"),
+        ("upload_asset", "published"),
+    ]
+    assert len(validate(entries, [])) == 1
+
+
+@pytest.mark.parametrize(
+    ("create_tag", "upload_tag"),
+    [
+        ('"$TAG"', '"$TAG"'),
+        ('"$TAG"', "v1"),
+        ("v1", "v2"),
+        ("v1", '"$TAG"'),
+    ],
+)
+def test_unknown_or_mismatched_draft_tag_cannot_authorize_upload(
+    tmp_path: Path, create_tag: str, upload_tag: str
+) -> None:
+    _write_workflow(
+        tmp_path,
+        _single_step_workflow(
+            f"gh release create {create_tag} --draft\ngh release upload {upload_tag} x.tgz"
+        ),
+    )
+    entries = inventory(tmp_path)
+    assert [(x.kind, x.target_state) for x in entries] == [
+        ("create_release", "draft"),
+        ("upload_asset", "published"),
+    ]
+    assert len(validate(entries, [])) == 1
+
+
+def test_matching_literal_tag_upload_allowed_but_wrong_tag_closes_window(
+    tmp_path: Path,
+) -> None:
+    _write_workflow(
+        tmp_path,
+        _single_step_workflow(
+            "gh release create v1 --draft\n"
+            "gh release upload v1 a.tgz\n"
+            "gh release upload v2 wrong.tgz\n"
+            "gh release upload v1 later.tgz"
+        ),
+    )
+    entries = inventory(tmp_path)
+    assert [entry.target_state for entry in entries] == [
+        "draft",
+        "draft",
+        "published",
+        "published",
+    ]
+    assert len(validate(entries, [])) == 2
