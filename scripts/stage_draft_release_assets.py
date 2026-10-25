@@ -158,7 +158,10 @@ def _downloaded_snapshot(
             raise ValueError("invalid or duplicate GitHub draft asset ID")
         seen_names.add(name)
         seen_ids.add(asset_id)
-        client.download_asset(repo, asset_id, destination / name)
+    # Validate the full remote name/positive-ID snapshot before downloading.
+    # State, size, and digest are checked after transfer by verify(...).
+    for asset in assets:
+        client.download_asset(repo, asset["id"], destination / asset["name"])
 
 
 def _reconcile_snapshot(
