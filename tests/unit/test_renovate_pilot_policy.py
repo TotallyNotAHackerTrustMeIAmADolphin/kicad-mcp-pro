@@ -33,21 +33,38 @@ def _mergify() -> dict[str, object]:
     return yaml.safe_load((ROOT / ".mergify.yml").read_text(encoding="utf-8"))
 
 
-def test_pilot_disabled_dependabot_preserved() -> None:
+def test_pilot_has_single_nonoverlapping_update_producer() -> None:
     config = _config()
-    assert config["enabled"] is False
+    assert config["enabled"] is True
+    assert config["enabledManagers"] == ["npm"]
+    assert config["includePaths"] == ["integrations/chatgpt-app/apps-sdk/**"]
     assert config["automerge"] is False
     assert config["platformAutomerge"] is False
-    assert config["prConcurrentLimit"] <= 2
+    assert config["prConcurrentLimit"] == 1
     assert config["prHourlyLimit"] <= 1
     assert config["separateMinorPatch"] is True
-    assert (ROOT / ".github/dependabot.yml").is_file()
-    assert set(config["enabledManagers"]) >= {"pep621", "npm", "cargo"}
+
+    updates = yaml.safe_load((ROOT / ".github/dependabot.yml").read_text(encoding="utf-8"))[
+        "updates"
+    ]
+    security_only = next(
+        entry
+        for entry in updates
+        if entry["package-ecosystem"] == "npm"
+        and entry["directory"] == "/integrations/chatgpt-app/apps-sdk"
+    )
+    assert security_only["open-pull-requests-limit"] == 0
+    security_group = security_only["groups"]["npm-chatgpt-app-security"]
+    assert security_group["applies-to"] == "security-updates"
+    assert security_group["patterns"] == ["*"]
+    assert ("npm", "/") in {(entry["package-ecosystem"], entry["directory"]) for entry in updates}
+    assert (ROOT / "integrations/chatgpt-app/apps-sdk/package-lock.json").is_file()
 
 
 def test_security_major_lockfile_policy() -> None:
     config = _config()
-    assert config["vulnerabilityAlerts"]["enabled"] is True
+    # GitHub Dependabot security updates / alerts remain the security producer.
+    assert config["vulnerabilityAlerts"]["enabled"] is False
     assert config["vulnerabilityAlerts"]["minimumReleaseAge"] is None
     assert config["lockFileMaintenance"]["enabled"] is False
     assert config["lockFileMaintenance"]["automerge"] is False

@@ -317,6 +317,7 @@ def test_dependabot_covers_repository_dependency_ecosystems_and_lockfiles() -> N
         entry.get("directory") for entry in updates if entry["package-ecosystem"] == "npm"
     }
     assert "/" in npm_directories
+    # Only security updates belong to Dependabot; normal versions are Renovate-owned.
     assert "/integrations/chatgpt-app/apps-sdk" in npm_directories
 
     policy = (ROOT / "docs" / "development" / "dependency-management.md").read_text(
@@ -355,7 +356,13 @@ def test_dependabot_staggers_version_updates_and_bounds_automation_backlog() -> 
     for entry in updates:
         assert entry["schedule"]["interval"] == "weekly"
         assert entry["schedule"]["timezone"] == "Europe/Istanbul"
-        assert entry["open-pull-requests-limit"] == 2
+        if (entry["package-ecosystem"], entry["directory"]) == (
+            "npm",
+            "/integrations/chatgpt-app/apps-sdk",
+        ):
+            assert entry["open-pull-requests-limit"] == 0
+        else:
+            assert entry["open-pull-requests-limit"] == 2
         assert entry["cooldown"] == {"default-days": 5}
 
 
