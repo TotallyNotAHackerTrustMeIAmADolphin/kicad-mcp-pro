@@ -57,15 +57,36 @@ provider responses in this JSON. Follow the exact field contract in
 `scripts/check_agent_native_smoke_evidence.py`. Review using:
 
 ```sh
+# Built-in, source-reviewed archive (no arbitrary CLI input path):
 uv run --all-extras --frozen python scripts/check_agent_native_smoke_evidence.py \
-  --report /path/to/sanitized-native-host-observation.json
+  --report 2026-10-26-linux-codex-native-smoke.json
 ```
 
 Passing returns `structurally_complete_not_attested` — **never** a release
-compatibility pass. A reviewer must independently inspect the pinned real-host
-execution log/digest, the source commit and environment before updating any
-published compatibility claim. Synthetic unit-test data cannot serve as evidence.
-The normal CI job does not install any agent host or generate passing evidence.
+compatibility pass. For a retained Codex observation, use the optional
+`--verify-sanitized-log` flag to check the **actual sibling log bytes** against
+the report: its SHA-256 digest, host/source identity, Skill origins, source-pinned
+readonly tool inventory, native diagnostic and basic redaction constraints.
+Binary digests in the log are **format-checked only**; they are not compared
+with the real executables or any report fields. An unreviewed source revision
+is rejected until its readonly tool policy is separately reviewed and pinned:
+
+```sh
+PYTHONPATH=. python scripts/check_agent_native_smoke_evidence.py \
+  --report docs/evidence/agent-host/2026-10-26-windows-codex-native-smoke.json \
+  --verify-sanitized-log
+```
+
+This offline check accepts reviewed, fixed archive identifiers only; arbitrary
+operator-selected file **paths are no longer passed to filesystem operations**.
+Dated archives must agree with the report date/OS. Newly captured reports
+outside the checkout use a **bounded stdin JSON envelope** containing
+name, report_b64 and log_b64 (empty only without log verification).
+The envelope is size-limited and decoded JSON rejects duplicate keys. The
+native-probe name codex-native-smoke.json is supported as data, not a path.
+Unreviewed archives require an explicit source allowlist addition after review.
+The validator fails closed on missing, altered or unsanitized data, and does
+not independently attest any native host.
 
 ## Native Codex 0.163.0 model-free readonly tool smoke — 2026-10-26 (#1219)
 
@@ -126,8 +147,25 @@ python scripts/probe_codex_native_readonly.py \
   --expected-python-sha256 <independently-reviewed-python-binary-sha256> \
   --expected-source-sha 57c0efb1f072f5fffbf1f527ee2348448705e32d \
   --output-dir /tmp/codex-mcp-native-review
-PYTHONPATH=. python scripts/check_agent_native_smoke_evidence.py \
-  --report /tmp/codex-mcp-native-review/codex-native-smoke.json
+# The CLI uses no filesystem paths from untrusted report arguments.
+# Feed new operator-selected files as DATA via a bounded stdin envelope.
+python - \
+  /tmp/codex-mcp-native-review/codex-native-smoke.json \
+  /tmp/codex-mcp-native-review/codex-native-sanitized-log.json <<'PY' | \
+  PYTHONPATH=. python scripts/check_agent_native_smoke_evidence.py \
+    --report - --verify-sanitized-log
+import base64
+import json
+import sys
+from pathlib import Path
+
+report, log = (Path(arg) for arg in sys.argv[1:])
+print(json.dumps({
+    "name": report.name,
+    "report_b64": base64.b64encode(report.read_bytes()).decode("ascii"),
+    "log_b64": base64.b64encode(log.read_bytes()).decode("ascii"),
+}))
+PY
 ```
 
 The two executable SHA-256 values must be obtained from a separate,
