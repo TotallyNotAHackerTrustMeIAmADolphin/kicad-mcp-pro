@@ -156,7 +156,7 @@ def _read_owner_binding(filename: Path) -> dict[str, str]:
         ):
             raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
         return value
-    except (OSError, ValueError, UnicodeError, TypeError) as exc:
+    except (OSError, ValueError, TypeError) as exc:
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED) from exc
     finally:
         if descriptor is not None:

@@ -130,6 +130,14 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   disposable PostgreSQL 17 database. These tests do **not** establish
   production owner OAuth login, approval of real project files or live
   end-to-end device provisioning.
+- `tests/cloud/test_enrollment_one_shot_integration.py` additionally
+  bridges the **actual local** enrollment implementation to the one-shot
+  CLI with the **same generated Ed25519 key and persisted origin/device
+  binding**. It verifies a synthetic owner challenge/redeem signature,
+  strict private metadata, one direct-child project-presence summary,
+  and rejection of a second read. The browser approval and network
+  transport are **synthetic fixtures**; this is **not** a production Cloud,
+  real browser OAuth, or real-owner acceptance test.
 - The local `tests/cloud/` suite is included in the full Python CI runner.
   For proportionate local validation, run
   `uv run --all-extras pytest -q tests/cloud/` and check the latest exact
