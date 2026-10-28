@@ -7,6 +7,10 @@ import asyncio
 import hashlib
 import json
 import os
+import re
+import select
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -97,6 +101,55 @@ def test_terminal_consent_rejects_noninteractive_or_declined_requests(
     monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("no prompt for piped commands"))
     with pytest.raises(cloud_once.LocalApprovalDeniedError):
         cloud_once._confirm_local_read(options)
+
+
+def test_same_uid_pty_is_not_independent_human_approval(tmp_path: Path) -> None:
+    """Threat-model evidence, not a passing security acceptance for Cloud.
+
+    A same-UID automation process can create its own real PTY, read a fresh
+    challenge and satisfy the CLI without a human. Exercise the actual
+    terminal checks in a separate child process: no monkeypatch, key or WSS.
+    Revisit this characterization when a separate owner authority exists.
+    """
+    master_fd, slave_fd = os.openpty()
+    child_code = (
+        "import sys\n"
+        "from kicad_mcp import cloud_once\n"
+        "args = cloud_once._parser().parse_args(sys.argv[1:])\n"
+        "cloud_once._confirm_local_read(args)\n"
+        "print('SYNTHETIC_PTY_CONSENT_PASSED', flush=True)\n"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", child_code, *_args(tmp_path, tmp_path / "no-owner-key.pem")],
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    observed = b""
+    try:
+        deadline = time.monotonic() + 6.0
+        challenge: re.Match[bytes] | None = None
+        while time.monotonic() < deadline and challenge is None:
+            readable, _, _ = select.select([master_fd], [], [], 0.2)
+            if readable:
+                observed += os.read(master_fd, 4096)
+                challenge = re.search(
+                    rb"Type APPROVE ([A-F0-9]{8}) to authorize exactly one read:",
+                    observed,
+                )
+        assert challenge is not None, observed.decode("utf-8", errors="replace")
+        os.write(master_fd, b"APPROVE " + challenge.group(1) + b"\n")
+        assert child.wait(timeout=5) == 0
+        # The CLI accepted synthetic same-user input, not human identity.
+        # This is intentionally evidence of a RELEASE BLOCKER, not a fix.
+        assert not (tmp_path / "no-owner-key.pem").exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=3)
+        os.close(master_fd)
 
 
 def test_unbound_owner_key_denied_before_private_key_or_network(

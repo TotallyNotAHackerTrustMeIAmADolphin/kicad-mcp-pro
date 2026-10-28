@@ -186,6 +186,26 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   dispatcher test checks a revoked grant and expired signed deadline.
   The send remains asynchronous, so independent Cloud-side delivery
   authorization and revocation checks are required.
+- **Independent-human-consent risk confirmed, not remediated:**
+  `test_same_uid_pty_is_not_independent_human_approval` launches a real
+  separate same-UID process under a synthetic POSIX PTY. Without monkeypatching
+  the terminal check, reading any owner key, or contacting Cloud, that process
+  answers the fresh challenge and the local confirmation succeeds. This is a
+  **threat-characterization test of the current unsafe trust assumption**,
+  not a negative security gate and not evidence of authorized owner consent.
+  The 0600 key and interactive prompt cannot protect against unrestricted
+  same-UID automation; browser OAuth/project grants are separate server-side
+  protections and were not attacked by this probe.
+
+  A production-ready boundary requires an **independently authenticated owner**
+  approving the exact Cloud origin, device, project, operation and one-shot
+  expiry through a trusted channel that an agent cannot drive with a PTY,
+  same-UID shell, localhost requests or reusable credentials. Run the agent
+  in a separately confined principal without owner key/project access,
+  privilege escalation or access to the owner-approval endpoint; prove these
+  exclusions with actual negative cross-principal/loopback tests. A separate
+  UID by itself is insufficient when it retains admin or container-host
+  privileges. No such boundary is implemented in this DRAFT.
 - The local `tests/cloud/` suite is included in the full Python CI runner.
   For proportionate local validation, run
   `uv run --all-extras pytest -q tests/cloud/` and check the latest exact
