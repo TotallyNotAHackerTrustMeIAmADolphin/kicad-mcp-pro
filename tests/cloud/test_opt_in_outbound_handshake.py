@@ -155,7 +155,9 @@ async def _scenario(tmp_path: Path, mode: str = "success") -> list[str]:
                     )
                 except ConnectionClosed:
                     observations.append("read_denied")
-        except Exception:
+        except ConnectionClosed:
+            # Expected only when the negative client deliberately closes.
+            # Assertions and signature failures must fail the test, not disappear.
             return
 
     async with serve(peer, "127.0.0.1", 0, ssl=tls) as server:

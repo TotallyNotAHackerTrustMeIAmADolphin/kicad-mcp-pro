@@ -14,7 +14,6 @@ import json
 import os
 import re
 import ssl
-import stat
 import sys
 import time
 from collections.abc import Callable
@@ -30,7 +29,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-from kicad_mcp.cloud_once import _load_owner_key
+from kicad_mcp.cloud_once import _load_owner_key, _open_owner_private_dir
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 _USER_CODE = re.compile(r"[A-Z0-9]{6}-[A-Z0-9]{6}")
@@ -72,13 +71,17 @@ def _post(
         raise CloudPairingError("pairing denied")
     # urllib3 is a direct runtime dependency. A dedicated pool is never shared
     # with untrusted origins; TLS hostname/CA verification is mandatory.
+    tls = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
+    tls.verify_mode = ssl.CERT_REQUIRED
+    tls.check_hostname = True
     pool = urllib3.HTTPSConnectionPool(
         origin[0],
         origin[1],
         timeout=urllib3.Timeout(connect=10, read=10),
         retries=False,
-        cert_reqs="CERT_REQUIRED",
-        ssl_context=ssl.create_default_context(),
+        cert_reqs=ssl.CERT_REQUIRED,
+        assert_hostname=origin[0],
+        ssl_context=tls,
     )
     try:
         # Do not follow redirects or retry a pairing request: either could
@@ -113,33 +116,22 @@ def _post(
 
 
 def _create_private_key(path: Path) -> Ed25519PrivateKey:
-    """Persist the key before enrollment, so a succeeded redeem cannot lose it."""
-    getuid = getattr(os, "getuid", None)
+    """Exclusive 0600 owner key inside a pinned 0700 directory, never a symlink."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
-    if (
-        os.name != "posix"
-        or not callable(getuid)
-        or not isinstance(nofollow, int)
-        or not path.is_absolute()
-    ):
+    if not isinstance(nofollow, int):
         raise CloudPairingError("pairing denied")
     try:
-        parent = path.parent
-        if parent.resolve(strict=True) != parent:
-            raise CloudPairingError("pairing denied")
-        directory = parent.stat()
-        if (
-            not stat.S_ISDIR(directory.st_mode)
-            or directory.st_uid != getuid()
-            or directory.st_mode & 0o077
-        ):
-            raise CloudPairingError("pairing denied")
+        directory_fd = _open_owner_private_dir(path)
+    except (OSError, ValueError) as exc:
+        raise CloudPairingError("pairing denied") from exc
+    try:
         key = Ed25519PrivateKey.generate()
         data = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
         fd = os.open(
-            path,
+            path.name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | getattr(os, "O_CLOEXEC", 0),
             0o600,
+            dir_fd=directory_fd,
         )
         try:
             with os.fdopen(fd, "wb") as handle:
@@ -147,30 +139,23 @@ def _create_private_key(path: Path) -> Ed25519PrivateKey:
                 handle.flush()
                 os.fsync(handle.fileno())
         except BaseException:
-            # Only this invocation's exclusive newly created private key is removed.
-            path.unlink(missing_ok=True)
+            # Only this invocation's exclusively created leaf is removed.
+            # The pinned directory descriptor prevents symlink/reparent races.
+            os.unlink(path.name, dir_fd=directory_fd)
             raise
         return key
     except (OSError, ValueError) as exc:
         raise CloudPairingError("pairing denied") from exc
+    finally:
+        os.close(directory_fd)
 
 
 def _load_or_create(path: Path) -> Ed25519PrivateKey:
-    getuid = getattr(os, "getuid", None)
-    if os.name != "posix" or not callable(getuid) or not path.is_absolute():
-        raise CloudPairingError("pairing denied")
     try:
-        parent = path.parent
-        metadata = parent.stat()
-        if (
-            parent.resolve(strict=True) != parent
-            or not stat.S_ISDIR(metadata.st_mode)
-            or metadata.st_uid != getuid()
-            or metadata.st_mode & 0o077
-        ):
-            raise CloudPairingError("pairing denied")
+        parent_fd = _open_owner_private_dir(path)
     except (OSError, ValueError) as exc:
         raise CloudPairingError("pairing denied") from exc
+    os.close(parent_fd)
     if path.is_symlink():
         raise CloudPairingError("pairing denied")
     if path.exists():

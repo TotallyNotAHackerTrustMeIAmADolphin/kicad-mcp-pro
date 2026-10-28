@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import stat
 import sys
 import time
@@ -25,22 +26,63 @@ from kicad_mcp.cloud_outbound_handshake import (
     execute_single_approved_read,
 )
 from kicad_mcp.cloud_read_dispatch import LocalReadDispatch
-from kicad_mcp.cloud_readonly_boundary import OperatorProject, VerifiedLocalBinding
+from kicad_mcp.cloud_readonly_boundary import (
+    OperatorProject,
+    VerifiedLocalBinding,
+    _open_operator_directory,
+)
 
 
 class LocalApprovalDeniedError(ValueError):
     """Fail closed, without returning private-key or filesystem details."""
 
 
+_OWNER_KEY_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _open_owner_private_dir(filename: Path) -> int:
+    """Pin an owner-private parent through a no-follow directory-component walk."""
+    getuid = getattr(os, "getuid", None)
+    if (
+        os.name != "posix"
+        or not callable(getuid)
+        or not isinstance(filename, Path)
+        or not filename.is_absolute()
+        or _OWNER_KEY_FILENAME.fullmatch(filename.name) is None
+        or any(part in {".", ".."} for part in filename.parts[1:])
+    ):
+        raise LocalApprovalDeniedError("local approval denied")
+    directory_fd: int | None = None
+    try:
+        directory_fd = _open_operator_directory(filename.parent)
+        metadata = os.fstat(directory_fd)
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or metadata.st_uid != getuid()
+            or metadata.st_mode & 0o077
+        ):
+            raise LocalApprovalDeniedError("local approval denied")
+        return directory_fd
+    except (OSError, ValueError) as exc:
+        if directory_fd is not None:
+            os.close(directory_fd)
+        raise LocalApprovalDeniedError("local approval denied") from exc
+
+
 def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
-    """Read a regular owner-only PEM through a non-following file descriptor."""
+    """Read owner-only PEM by a pinned private directory FD and no-follow basename."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
     getuid = getattr(os, "getuid", None)
     if os.name != "posix" or not isinstance(nofollow, int) or not callable(getuid):
         raise LocalApprovalDeniedError("local approval denied")
+    directory_fd = _open_owner_private_dir(filename)
     descriptor: int | None = None
     try:
-        descriptor = os.open(filename, os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0))
+        descriptor = os.open(
+            filename.name,
+            os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=directory_fd,
+        )
         metadata = os.fstat(descriptor)
         if (
             not stat.S_ISREG(metadata.st_mode)
@@ -58,6 +100,7 @@ def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
     finally:
         if descriptor is not None:
             os.close(descriptor)
+        os.close(directory_fd)
 
 
 def _parser() -> argparse.ArgumentParser:

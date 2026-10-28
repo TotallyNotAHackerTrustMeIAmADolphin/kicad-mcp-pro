@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from kicad_mcp import cloud_pair
-from kicad_mcp.cloud_once import _load_owner_key
+from kicad_mcp.cloud_once import LocalApprovalDeniedError, _load_owner_key
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Owner-key persistence needs POSIX")
 CHALLENGE = "11111111-1111-4111-8111-111111111111"
@@ -112,6 +112,40 @@ def test_no_unsafe_key_file_reuse_or_world_writable_parent(tmp_path: Path) -> No
         cloud_pair._create_private_key(source)
 
 
+def test_owner_key_directory_walk_denies_traversal_and_symlink_ancestors(
+    tmp_path: Path,
+) -> None:
+    protected = tmp_path / "protected"
+    protected.mkdir(mode=0o700)
+    keyfile = protected / "owner.pem"
+    cloud_pair._create_private_key(keyfile)
+    assert isinstance(_load_owner_key(keyfile).public_key(), Ed25519PublicKey)
+
+    # Lexical traversal is never normalized away before the no-follow open.
+    traversal = protected / ".." / "protected" / "owner.pem"
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair._load_or_create(traversal)
+    with pytest.raises(LocalApprovalDeniedError):
+        _load_owner_key(traversal)
+
+    # An attacker cannot substitute an ancestor with a symlink, even if its
+    # target has correct ownership, permissions and the expected key file.
+    linked = tmp_path / "linked"
+    linked.symlink_to(protected, target_is_directory=True)
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair._load_or_create(linked / "new.pem")
+    with pytest.raises(LocalApprovalDeniedError):
+        _load_owner_key(linked / "owner.pem")
+
+    public_parent = tmp_path / "public"
+    public_parent.mkdir(mode=0o700)
+    public_parent.chmod(0o755)
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair._create_private_key(public_parent / "new.pem")
+    assert not (public_parent / "new.pem").exists()
+    assert _load_owner_key(keyfile)
+
+
 def test_declined_or_tampered_challenge_never_redeems(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -195,8 +229,10 @@ def test_https_pairing_post_sends_only_expected_json_and_refuses_oversize(
             assert (host, port) == ("localhost", 443)
             assert isinstance(options["timeout"], cloud_pair.urllib3.Timeout)
             assert options["retries"] is False
-            assert options["cert_reqs"] == "CERT_REQUIRED"
-            assert "ssl_context" in options
+            assert options["cert_reqs"] == cloud_pair.ssl.CERT_REQUIRED
+            assert options["assert_hostname"] == "localhost"
+            assert options["ssl_context"].verify_mode == cloud_pair.ssl.CERT_REQUIRED
+            assert options["ssl_context"].check_hostname is True
 
         def request(self, method: str, path: str, **options: object) -> Response:
             assert method == "POST" and path == "/api/v1/pairing/device/challenge"

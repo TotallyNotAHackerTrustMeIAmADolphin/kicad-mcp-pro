@@ -223,8 +223,8 @@ async def _scenario(tmp_path: Path, mode: str) -> list[str]:
                 await ws.send('{"kind":"connector.ready","version":2}')
             else:
                 await ws.send('{"kind":"connector.ready","version":1}')
-        except (ConnectionClosed, AssertionError):
-            # Abort is expected in negative cases. No retries or accounts.
+        except ConnectionClosed:
+            # Aborts are expected; assertion failures must remain visible.
             return
 
     async with serve(
