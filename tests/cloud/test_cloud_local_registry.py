@@ -167,3 +167,30 @@ def test_legacy_cli_path_flags_rejected_by_both_commands() -> None:
             ]
         )
     assert pairing_error.value.code == 2
+
+
+def test_registered_local_key_fingerprint_is_bound_to_device(tmp_path: Path) -> None:
+    """Use genuine synthetic Ed25519 material, never owner production keys."""
+    import hashlib
+
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    from kicad_mcp import cloud_once, cloud_pair
+
+    root, _directory, _record = _fixture(tmp_path)
+    keyfile = root / "keys" / f"{DEVICE}.pem"
+    keyfile.unlink()
+    signing_key = cloud_pair._create_private_key(keyfile)
+    der = signing_key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    cloud_once._save_owner_binding(
+        keyfile, origin=ORIGIN, device_id=DEVICE, fingerprint=hashlib.sha256(der).hexdigest()
+    )
+    profile = _resolve(root)
+    actual_key = cloud_once._load_bound_owner_key(profile.key_file, ORIGIN, DEVICE)
+    assert actual_key.public_key() == signing_key.public_key()
+    with pytest.raises(LocalApprovalDeniedError):
+        cloud_once._load_bound_owner_key(profile.key_file, "https://other.example", DEVICE)
+    with pytest.raises(LocalApprovalDeniedError):
+        cloud_once._load_bound_owner_key(
+            profile.key_file, ORIGIN, "77777777-7777-4777-8777-777777777777"
+        )
