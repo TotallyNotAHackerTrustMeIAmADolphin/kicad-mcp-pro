@@ -8,7 +8,11 @@ from pathlib import Path
 import pytest
 
 from kicad_mcp.tools import validation
-from kicad_mcp.validation.zone_fill import drc_outcome_changes, scan_zone_fill
+from kicad_mcp.validation.zone_fill import (
+    drc_outcome_changes,
+    fill_geometry_changes,
+    scan_zone_fill,
+)
 
 FILLED_ZONE = """
 	(zone
@@ -217,10 +221,11 @@ def _wire(
     monkeypatch.setattr(validation, "_get_pcb_file", lambda: board)
     monkeypatch.setattr(validation, "_run_drc_report", lambda name: (Path(name), drc, None))
 
-    def fake_probe(path: Path) -> tuple[dict[str, object] | None, str | None]:
+    def fake_probe(path: Path) -> tuple[dict[str, object] | None, str | None, str | None]:
         calls.append(path.name)
         if probe is None:
-            return json.loads(json.dumps(drc)), None
+            # A refill that reproduces both the DRC result and the stored fill.
+            return json.loads(json.dumps(drc)), board_text, None
         return probe  # type: ignore[return-value]
 
     monkeypatch.setattr(validation, "_refill_probe_report", fake_probe)
@@ -270,7 +275,13 @@ def test_gate_is_blocked_when_the_stored_fill_is_stale(
     stale["unconnected_items"] = [
         {"type": "unconnected_items", "items": [{"description": "Pad 1 [GND] of C1"}]}
     ]
-    _wire(monkeypatch, tmp_path, _board(FILLED_ZONE), report=stale, probe=(_clean_report(), None))
+    _wire(
+        monkeypatch,
+        tmp_path,
+        _board(FILLED_ZONE),
+        report=stale,
+        probe=(_clean_report(), _board(FILLED_ZONE), None),
+    )
 
     outcome = validation._evaluate_pcb_gate()
 
@@ -283,7 +294,7 @@ def test_gate_is_blocked_when_the_stored_fill_is_stale(
 def test_gate_is_blocked_when_the_refill_probe_cannot_run(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _wire(monkeypatch, tmp_path, _board(FILLED_ZONE), probe=(None, "timed out"))
+    _wire(monkeypatch, tmp_path, _board(FILLED_ZONE), probe=(None, None, "timed out"))
 
     outcome = validation._evaluate_pcb_gate()
 
@@ -328,7 +339,7 @@ def test_gate_keeps_fail_semantics_for_real_violations_on_a_filled_board(
 # ---- the refill probe itself ----------------------------------------------------------
 
 
-def test_refill_probe_refills_a_copy_and_never_saves_or_touches_the_board(
+def test_refill_probe_saves_the_refilled_copy_and_never_touches_the_board(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     board = tmp_path / "demo.kicad_pcb"
@@ -348,17 +359,20 @@ def test_refill_probe_refills_a_copy_and_never_saves_or_touches_the_board(
         assert (copy.parent / "demo.kicad_pro").is_file()
         assert (copy.parent / "fp-lib-table").is_file()
         out.write_text(json.dumps(_clean_report()), encoding="utf-8")
+        copy.write_text(_board(FILLED_ZONE) + "; saved by kicad-cli", encoding="utf-8")
         return 0, "", ""
 
     monkeypatch.setattr(validation, "_run_cli_variants", fake_cli)
 
-    report, error = validation._refill_probe_report(board)
+    report, refilled_text, error = validation._refill_probe_report(board)
 
     assert error is None
     assert report == _clean_report()
+    assert refilled_text is not None
+    assert refilled_text.endswith("; saved by kicad-cli")
     (args,) = seen
     assert "--refill-zones" in args
-    assert "--save-board" not in args
+    assert "--save-board" in args
     assert board.read_bytes() == before
     assert not Path(args[-1]).parent.exists()
 
@@ -374,9 +388,10 @@ def test_refill_probe_reports_cli_failures(
     board.write_text(_board(FILLED_ZONE), encoding="utf-8")
     monkeypatch.setattr(validation, "_run_cli_variants", lambda _variants: result)
 
-    report, error = validation._refill_probe_report(board)
+    report, refilled_text, error = validation._refill_probe_report(board)
 
     assert report is None
+    assert refilled_text is None
     assert error is not None
     assert needle in error
 
@@ -392,9 +407,10 @@ def test_refill_probe_reports_a_missing_cli(
 
     monkeypatch.setattr(validation, "_run_cli_variants", no_cli)
 
-    report, error = validation._refill_probe_report(board)
+    report, refilled_text, error = validation._refill_probe_report(board)
 
     assert report is None
+    assert refilled_text is None
     assert error is not None
     assert "not available" in error
 
@@ -413,3 +429,90 @@ def test_gate_lists_blockers_before_the_per_net_lines(
 
     # Downstream renderers keep only the first few detail lines.
     assert any(d.startswith("BLOCKED: ") for d in outcome.details[:6])
+
+
+def test_gate_is_blocked_when_different_fills_give_identical_drc_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    refilled_board = _board(FILLED_ZONE.replace("(xy 9 9)", "(xy 8 8)"))
+    _wire(
+        monkeypatch,
+        tmp_path,
+        _board(FILLED_ZONE),
+        probe=(_clean_report(), refilled_board, None),
+    )
+
+    outcome = validation._evaluate_pcb_gate()
+
+    assert outcome.status == "BLOCKED"
+    assert any("stale" in d and "fill geometry" in d for d in outcome.details)
+    assert not any("filled and current" in d for d in outcome.details)
+
+
+def test_gate_is_blocked_when_the_refilled_copy_was_not_saved(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _wire(monkeypatch, tmp_path, _board(FILLED_ZONE), probe=(_clean_report(), None, None))
+
+    outcome = validation._evaluate_pcb_gate()
+
+    assert outcome.status == "BLOCKED"
+    assert any("could not be verified as current" in d for d in outcome.details)
+
+
+def test_gate_accepts_the_same_fill_written_in_another_vertex_order(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    reordered = FILLED_ZONE.replace(
+        "(pts (xy 1 1) (xy 9 1) (xy 9 9))",
+        "(pts\n\t\t\t(xy 9.000000 9)\n\t\t\t(xy 1 1) (xy 9 1.0))",
+    )
+    _wire(
+        monkeypatch,
+        tmp_path,
+        _board(FILLED_ZONE),
+        probe=(_clean_report(), _board(reordered), None),
+    )
+
+    assert validation._evaluate_pcb_gate().status == "PASS"
+
+
+def test_fill_geometry_changes_pinpoints_the_zone_and_layer() -> None:
+    moved = FILLED_ZONE.replace(
+        '(filled_polygon (layer "B.Cu") (pts (xy 1 1) (xy 9 1) (xy 9 9)))',
+        '(filled_polygon (layer "B.Cu") (pts (xy 1 1) (xy 9 1) (xy 9 8)))',
+    )
+
+    changes = fill_geometry_changes(_board(FILLED_ZONE), _board(moved))
+
+    assert len(changes) == 1
+    assert "11111111-1111-1111-1111-111111111111" in changes[0]
+    assert "B.Cu" in changes[0]
+    assert fill_geometry_changes(_board(FILLED_ZONE), _board(FILLED_ZONE)) == []
+
+
+def test_refill_probe_leaves_the_original_board_and_project_files_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    board = tmp_path / "demo.kicad_pcb"
+    project = tmp_path / "demo.kicad_pro"
+    board.write_text(_board(FILLED_ZONE), encoding="utf-8")
+    project.write_text("{}", encoding="utf-8")
+    before = (board.read_bytes(), project.read_bytes())
+
+    def fake_cli(variants: list[list[str]]) -> tuple[int, str, str]:
+        (args,) = variants
+        copy = Path(args[-1])
+        # kicad-cli rewrites its input: here, the scratch copy and its project file.
+        copy.write_text(_board(), encoding="utf-8")
+        (copy.parent / "demo.kicad_pro").write_text('{"changed": 1}', encoding="utf-8")
+        Path(args[args.index("--output") + 1]).write_text(
+            json.dumps(_clean_report()), encoding="utf-8"
+        )
+        return 0, "", ""
+
+    monkeypatch.setattr(validation, "_run_cli_variants", fake_cli)
+
+    validation._refill_probe_report(board)
+
+    assert (board.read_bytes(), project.read_bytes()) == before

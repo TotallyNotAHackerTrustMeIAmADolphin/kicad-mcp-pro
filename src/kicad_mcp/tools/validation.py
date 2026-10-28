@@ -49,7 +49,7 @@ from ..validation.drc_report import (
     unconnected_nets,
 )
 from ..validation.policy_state import ValidationPolicyStateService
-from ..validation.zone_fill import drc_outcome_changes, scan_zone_fill
+from ..validation.zone_fill import drc_outcome_changes, fill_geometry_changes, scan_zone_fill
 from . import validation_policy_state
 from .export_support import _ensure_output_dir, _get_pcb_file, _get_sch_file, _run_cli_variants
 from .gates import GateOutcome, GateStatus, _combined_status
@@ -1636,12 +1636,15 @@ _ZONE_PROBE_SIBLINGS = ("fp-lib-table", "sym-lib-table")
 _MAX_UNFILLED_ZONE_LINES = 10
 
 
-def _refill_probe_report(pcb_file: Path) -> tuple[dict[str, object] | None, str | None]:
-    """Run DRC with a fresh zone refill on a throwaway copy of the board.
+def _refill_probe_report(
+    pcb_file: Path,
+) -> tuple[dict[str, object] | None, str | None, str | None]:
+    """Refill zones on a throwaway copy of the board, save it and run DRC on it.
 
-    The refill happens in memory inside kicad-cli and the result is never saved
-    (``--save-board`` is deliberately not passed). Working on a copy keeps the project
-    directory untouched, including the sidecar files kicad-cli may create next to its input.
+    Returns ``(drc_report, refilled_board_text, error)``. ``--save-board`` is passed so the
+    freshly computed fill can be compared with the stored one; it only ever writes the
+    scratch copy. Working on a copy keeps the original board and project directory
+    untouched, including the sidecar files kicad-cli may create next to its input.
     """
     with tempfile.TemporaryDirectory(prefix="kicad-mcp-zone-probe-") as scratch:
         work = Path(scratch)
@@ -1656,26 +1659,30 @@ def _refill_probe_report(pcb_file: Path) -> tuple[dict[str, object] | None, str 
                 if sibling.is_file():
                     shutil.copyfile(sibling, work / sibling.name)
         except OSError as exc:
-            return None, f"could not prepare a scratch copy of the board ({exc})"
+            return None, None, f"could not prepare a scratch copy of the board ({exc})"
 
         out_file = work / "zone_probe_drc.json"
         command = ["pcb", "drc", "--output", str(out_file), "--format", "json", "--severity-all"]
-        command += ["--refill-zones", str(copy)]
+        command += ["--refill-zones", "--save-board", str(copy)]
         try:
             code, _stdout, stderr = _run_cli_variants([command])
         except (OSError, subprocess.SubprocessError) as exc:
-            return None, str(exc)
+            return None, None, str(exc)
         if not out_file.is_file():
             detail = stderr.strip() or f"exit code {code}"
-            return None, f"kicad-cli produced no DRC report with --refill-zones ({detail})"
+            return None, None, f"kicad-cli produced no DRC report with --refill-zones ({detail})"
         try:
             parsed = json.loads(out_file.read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
-            return None, f"the refill DRC report could not be read ({exc})"
+            return None, None, f"the refill DRC report could not be read ({exc})"
         status, schema_error = drc_runner.classify_drc_report(parsed)
         if status == "malformed":
-            return None, f"the refill DRC report is malformed ({schema_error})"
-        return cast(dict[str, object], parsed), None
+            return None, None, f"the refill DRC report is malformed ({schema_error})"
+        try:
+            refilled_text = copy.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            return None, None, f"the refilled board copy could not be read ({exc})"
+        return cast(dict[str, object], parsed), refilled_text, None
 
 
 def _zone_fill_check(report: dict[str, object]) -> tuple[list[str], list[str]]:
@@ -1708,19 +1715,27 @@ def _zone_fill_check(report: dict[str, object]) -> tuple[list[str], list[str]]:
         blockers.append(hint)
         return blockers, []
 
-    refilled, error = _refill_probe_report(pcb_file)
-    if refilled is None:
-        return [f"Zone fill could not be verified as current: {error}."], []
+    refilled, refilled_text, error = _refill_probe_report(pcb_file)
+    if refilled is None or refilled_text is None:
+        return [f"Zone fill could not be verified as current: {error or 'no refilled copy'}."], []
+    stale: list[str] = []
     changes = drc_outcome_changes(report, refilled)
     if changes:
-        return [
-            "Stored zone fill is stale: a fresh refill changes the DRC result "
-            f"({'; '.join(changes)}).",
-            hint,
-        ], []
+        stale.append(f"a fresh refill changes the DRC result ({'; '.join(changes)})")
+    geometry = fill_geometry_changes(board_text, refilled_text)
+    if geometry:
+        shown = "; ".join(geometry[:_MAX_UNFILLED_ZONE_LINES])
+        more = len(geometry) - _MAX_UNFILLED_ZONE_LINES
+        suffix = f"; {more} more" if more > 0 else ""
+        stale.append(
+            f"the fill geometry differs from a fresh refill in {len(geometry)} "
+            f"zone layer(s) ({shown}{suffix})"
+        )
+    if stale:
+        return [f"Stored zone fill is stale: {'; and '.join(stale)}.", hint], []
     return [], [
         f"Zone fill: {scan.copper_zones} copper zone(s) filled and current "
-        "(a fresh refill reproduces the stored DRC result)"
+        "(a fresh refill reproduces the stored fill geometry and DRC result)"
     ]
 
 
