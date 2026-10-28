@@ -61,7 +61,7 @@ class SimulatedGrantState:
     project_enabled: bool = True
     client_grant_enabled: bool = True
     session_active: bool = True
-    token_revoked: bool = False
+    oauth_cutoff_active: bool = False
     last_sequence: int = 0
 
     def deliver(
@@ -86,7 +86,7 @@ class SimulatedGrantState:
             or not self.device_enabled
             or not self.project_enabled
             or not self.client_grant_enabled
-            or self.token_revoked
+            or self.oauth_cutoff_active
             or type(sequence) is not int
             or sequence != self.last_sequence + 1
         ):
@@ -161,7 +161,7 @@ def test_synthetic_active_grant_allows_only_boolean_metadata(target: OperatorPro
         {"project_enabled": False},
         {"client_grant_enabled": False},
         {"session_active": False},
-        {"token_revoked": True},
+        {"oauth_cutoff_active": True},
         {"session_expires": NOW},
     ],
 )
