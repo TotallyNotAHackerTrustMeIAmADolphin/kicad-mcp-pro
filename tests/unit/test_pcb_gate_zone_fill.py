@@ -86,6 +86,60 @@ def test_scan_flags_a_copper_zone_without_filled_polygons() -> None:
     assert "F.Cu" in scan.unfilled[0]
 
 
+PARTLY_FILLED_ZONE = """
+	(zone
+		(net 1)
+		(net_name "GND")
+		(layers "F.Cu" "B.Cu")
+		(uuid "55555555-5555-5555-5555-555555555555")
+		(fill yes (thermal_gap 0.5) (thermal_bridge_width 0.5))
+		(polygon (pts (xy 0 0) (xy 10 0) (xy 10 10)))
+		(filled_polygon (layer "F.Cu") (pts (xy 1 1) (xy 9 1) (xy 9 9)))
+	)"""
+
+
+def test_scan_flags_a_multi_layer_zone_filled_on_only_one_of_its_layers() -> None:
+    scan = scan_zone_fill(_board(PARTLY_FILLED_ZONE))
+
+    assert scan.copper_zones == 1
+    assert len(scan.unfilled) == 1
+    assert "B.Cu" in scan.unfilled[0]
+    assert "no stored fill on B.Cu" in scan.unfilled[0]
+
+
+def test_scan_flags_the_f_and_b_shorthand_filled_on_only_one_layer() -> None:
+    shorthand = PARTLY_FILLED_ZONE.replace('(layers "F.Cu" "B.Cu")', '(layers "F&B.Cu")')
+
+    scan = scan_zone_fill(_board(shorthand))
+
+    assert len(scan.unfilled) == 1
+    assert "no stored fill on B.Cu" in scan.unfilled[0]
+    assert "F.Cu" not in scan.unfilled[0].split("no stored fill on")[1]
+
+
+def test_scan_flags_a_shorthand_zone_with_no_fill_on_either_layer() -> None:
+    bare = FILLED_ZONE.replace("filled_polygon", "other_thing")
+
+    scan = scan_zone_fill(_board(bare))
+
+    assert len(scan.unfilled) == 1
+    assert "no stored fill on F.Cu, B.Cu" in scan.unfilled[0]
+
+
+def test_scan_accepts_a_multi_layer_zone_filled_on_every_layer() -> None:
+    both = PARTLY_FILLED_ZONE.replace(
+        "\n\t)", '\n\t\t(filled_polygon (layer "B.Cu") (pts (xy 1 1) (xy 9 1) (xy 9 9)))\n\t)'
+    )
+
+    assert scan_zone_fill(_board(both)).unfilled == []
+
+
+def test_scan_only_requires_fill_on_the_copper_layers_of_a_mixed_layer_zone() -> None:
+    mixed = PARTLY_FILLED_ZONE.replace('(layers "F.Cu" "B.Cu")', '(layers "F.Cu" "F.Mask")')
+
+    assert scan_zone_fill(_board(mixed)).unfilled == []
+
+
 def test_scan_ignores_rule_areas_and_non_copper_zones_and_zone_connect() -> None:
     scan = scan_zone_fill(_board(KEEPOUT_ZONE, SILK_ZONE, PAD_WITH_ZONE_CONNECT))
 
