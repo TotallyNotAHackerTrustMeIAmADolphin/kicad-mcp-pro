@@ -11,6 +11,7 @@ import asyncio
 import json
 import re
 import ssl
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from urllib.parse import urlsplit
@@ -24,6 +25,7 @@ from kicad_mcp.cloud_device_proofs import (
     sign_device_challenge,
     sign_session_challenge,
 )
+from kicad_mcp.cloud_read_dispatch import LocalReadDispatch
 
 CONNECTOR_WS_PATH = "/api/v1/connector/ws"
 _DEVICE_UUID = re.compile(
@@ -86,7 +88,7 @@ def _read_strict_json(raw: str, expected_kind: str) -> dict[str, object]:
     return message
 
 
-async def establish_proof_only_handshake(
+async def _perform_outbound_session(
     *,
     origin: str,
     trusted_origin: str,
@@ -94,8 +96,9 @@ async def establish_proof_only_handshake(
     device_id: str,
     signing_key: Ed25519PrivateKey,
     tls_context: ssl.SSLContext | None = None,
+    dispatcher_factory: Callable[[HandshakeReceipt], LocalReadDispatch] | None = None,
 ) -> HandshakeReceipt:
-    """Perform the real Cloud v1 proof order and immediately close the socket.
+    """Perform the Cloud v1 proof order; optionally handle one approved read.
 
     Origin and credentials MUST come from independently trusted operator setup
     (not Cloud messages). A custom TLS context is for controlled enterprise
@@ -124,7 +127,7 @@ async def establish_proof_only_handshake(
         return int(datetime.now(UTC).timestamp() * 1000)
 
     try:
-        async with asyncio.timeout(HANDSHAKE_TIMEOUT_SECONDS):
+        async with asyncio.timeout(HANDSHAKE_TIMEOUT_SECONDS if dispatcher_factory is None else 40):
             async with connect(
                 endpoint,
                 ssl=context,
@@ -182,8 +185,100 @@ async def establish_proof_only_handshake(
                     or ready["version"] != 1
                 ):
                     raise CloudHandshakeDeniedError("handshake denied")
-                # Do not dispatch remote commands. Socket is explicitly closed
-                # by exiting this context immediately after the handshake.
-                return HandshakeReceipt(device_id=device_id, session_id=session_id)
+                receipt = HandshakeReceipt(device_id=device_id, session_id=session_id)
+                if dispatcher_factory is None:
+                    # Proof-only mode retains its original no-command behavior.
+                    return receipt
+                # The caller, not Cloud wire claims, supplies this independent
+                # local authorization and owner-approved project selection.
+                dispatcher = dispatcher_factory(receipt)
+                if not isinstance(dispatcher, LocalReadDispatch):
+                    raise CloudHandshakeDeniedError("handshake denied")
+                try:
+                    dispatcher.assert_transport_session(device_id=device_id, session_id=session_id)
+                    raw_request = await socket.recv()
+                    if not isinstance(raw_request, str):
+                        raise CloudHandshakeDeniedError("handshake denied")
+                    envelope = _read_strict_json(raw_request, "connector.authorized_read")
+                    if (
+                        set(envelope) != {"kind", "version", "sequence", "request"}
+                        or type(envelope["version"]) is not int
+                        or envelope["version"] != 1
+                        or type(envelope["sequence"]) is not int
+                        or not isinstance(envelope["request"], dict)
+                    ):
+                        raise CloudHandshakeDeniedError("handshake denied")
+                    request_bytes = json.dumps(
+                        envelope["request"], separators=(",", ":"), ensure_ascii=False
+                    ).encode("utf-8")
+                    # read() fences replay, local path, expiry, and real-time
+                    # authorization; no native KiCad operation is exposed.
+                    response = await asyncio.to_thread(
+                        dispatcher.read, request_bytes, sequence=envelope["sequence"]
+                    )
+                    dispatcher.assert_transport_session(device_id=device_id, session_id=session_id)
+                    await socket.send(
+                        json.dumps(
+                            {
+                                "kind": "connector.read_result",
+                                "version": 1,
+                                "sequence": envelope["sequence"],
+                                "result": response,
+                            },
+                            separators=(",", ":"),
+                        )
+                    )
+                    return receipt
+                finally:
+                    dispatcher.close()
     except (OSError, ValueError, TimeoutError, WebSocketException) as exc:
         raise CloudHandshakeDeniedError("handshake denied") from exc
+
+
+async def establish_proof_only_handshake(
+    *,
+    origin: str,
+    trusted_origin: str,
+    owner_sub: str,
+    device_id: str,
+    signing_key: Ed25519PrivateKey,
+    tls_context: ssl.SSLContext | None = None,
+) -> HandshakeReceipt:
+    """Perform the device proof and close without accepting any commands."""
+    return await _perform_outbound_session(
+        origin=origin,
+        trusted_origin=trusted_origin,
+        owner_sub=owner_sub,
+        device_id=device_id,
+        signing_key=signing_key,
+        tls_context=tls_context,
+    )
+
+
+async def execute_single_approved_read(
+    *,
+    origin: str,
+    trusted_origin: str,
+    owner_sub: str,
+    device_id: str,
+    signing_key: Ed25519PrivateKey,
+    dispatcher_factory: Callable[[HandshakeReceipt], LocalReadDispatch],
+    tls_context: ssl.SSLContext | None = None,
+) -> HandshakeReceipt:
+    """Opt-in one-shot metadata relay; requires independent local grant authority.
+
+    This API cannot establish OAuth, enroll a device, or grant access by itself.
+    No production caller is registered; the Cloud server must independently
+    authorize and deliver one read over this wire protocol before activation.
+    """
+    if not callable(dispatcher_factory):
+        raise CloudHandshakeDeniedError("handshake denied")
+    return await _perform_outbound_session(
+        origin=origin,
+        trusted_origin=trusted_origin,
+        owner_sub=owner_sub,
+        device_id=device_id,
+        signing_key=signing_key,
+        tls_context=tls_context,
+        dispatcher_factory=dispatcher_factory,
+    )

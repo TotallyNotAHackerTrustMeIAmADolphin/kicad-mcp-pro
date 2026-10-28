@@ -60,6 +60,18 @@ class LocalReadDispatch:
         if authorized is not True:
             raise LocalReadDeniedError("request denied")
 
+    def assert_transport_session(self, *, device_id: str, session_id: str) -> None:
+        """Fence an externally authenticated socket to this local dispatcher."""
+        with self._lock:
+            if (
+                self._closed
+                or self._verified.device_id != device_id
+                or self._verified.session_id != session_id
+                or self._project.device_id != device_id
+                or self._project.project_id != self._verified.project_id
+            ):
+                raise LocalReadDeniedError("request denied")
+
     def close(self) -> None:
         """Invalidate this session, including any pending read response."""
         with self._lock:

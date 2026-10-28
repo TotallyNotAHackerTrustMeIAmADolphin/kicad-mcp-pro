@@ -13,11 +13,15 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from test_isolated_tls_websocket_handshake import _synthetic_tls
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.exceptions import ConnectionClosed
 
 from kicad_mcp.cloud_outbound_handshake import (
     CloudHandshakeDeniedError,
     establish_proof_only_handshake,
+    execute_single_approved_read,
 )
+from kicad_mcp.cloud_read_dispatch import LocalReadDispatch
+from kicad_mcp.cloud_readonly_boundary import OperatorProject, VerifiedLocalBinding
 
 DEVICE = "11111111-1111-4111-8111-111111111111"
 OTHER_DEVICE = "22222222-2222-4222-8222-222222222222"
@@ -27,6 +31,8 @@ SESSION_CHALLENGE = "55555555-5555-4555-8555-555555555555"
 OWNER = "fixture-owner"
 NONCE = base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip("=")
 BINDING = base64.urlsafe_b64encode(bytes(range(32, 64))).decode().rstrip("=")
+PROJECT = "66666666-6666-4666-8666-666666666666"
+READ = "77777777-7777-4777-8777-777777777777"
 
 
 def _sig(reply: dict[str, object]) -> bytes:
@@ -112,6 +118,31 @@ async def _scenario(tmp_path: Path, mode: str = "success") -> list[str]:
                 await ws.send(b'{"kind":"connector.ready","version":1}')
             else:
                 await ws.send('{"kind":"connector.ready","version":1}')
+            if mode in {"approved-read", "denied-operation", "revoked", "wrong-session"}:
+                request = {
+                    "kind": "connector.read_request",
+                    "version": 1,
+                    "requestId": READ,
+                    "deviceId": DEVICE,
+                    "projectId": PROJECT,
+                    "operation": "run_drc" if mode == "denied-operation" else "project_summary",
+                    "deadlineUnixMs": int(datetime.now(UTC).timestamp() * 1000) + 5_000,
+                }
+                await ws.send(
+                    json.dumps(
+                        {
+                            "kind": "connector.authorized_read",
+                            "version": 1,
+                            "sequence": 1,
+                            "request": request,
+                        }
+                    )
+                )
+                try:
+                    answer = await ws.recv()
+                    observations.append("answer:" + str(answer))
+                except ConnectionClosed:
+                    observations.append("read_denied")
         except Exception:
             return
 
@@ -125,22 +156,51 @@ async def _scenario(tmp_path: Path, mode: str = "success") -> list[str]:
         if mode == "wrong-host":
             origin = f"https://127.0.0.1:{port}"
         try:
-            receipt = await establish_proof_only_handshake(
-                origin=origin,
-                trusted_origin=origin,
-                owner_sub=OWNER,
-                device_id=DEVICE,
-                signing_key=signing_key,
-                tls_context=trust,
-            )
+            if mode in {"approved-read", "denied-operation", "revoked", "wrong-session"}:
+                folder = tmp_path / "approved-project"
+                folder.mkdir(exist_ok=True)
+                (folder / "demo.kicad_pro").write_text("private contents")
+
+                def local_dispatcher(receipt):
+                    return LocalReadDispatch(
+                        verified=VerifiedLocalBinding(
+                            DEVICE,
+                            PROJECT,
+                            frozenset({"project_summary"}),
+                            SESSION if mode != "wrong-session" else READ,
+                            int(datetime.now(UTC).timestamp() * 1000) + 30_000,
+                        ),
+                        operator_project=OperatorProject(DEVICE, PROJECT, folder, "demo"),
+                        current_authorization=lambda: mode != "revoked",
+                    )
+
+                receipt = await execute_single_approved_read(
+                    origin=origin,
+                    trusted_origin=origin,
+                    owner_sub=OWNER,
+                    device_id=DEVICE,
+                    signing_key=signing_key,
+                    tls_context=trust,
+                    dispatcher_factory=local_dispatcher,
+                )
+            else:
+                receipt = await establish_proof_only_handshake(
+                    origin=origin,
+                    trusted_origin=origin,
+                    owner_sub=OWNER,
+                    device_id=DEVICE,
+                    signing_key=signing_key,
+                    tls_context=trust,
+                )
         except CloudHandshakeDeniedError:
             if mode == "success":
                 raise
             observations.append("denied")
         else:
-            assert mode == "success", "a negative scenario was admitted"
+            assert mode in {"success", "approved-read"}, "a negative scenario was admitted"
             assert receipt.device_id == DEVICE and receipt.session_id == SESSION
-            observations.append("completed")
+            if mode == "success":
+                observations.append("completed")
     return observations
 
 
@@ -238,3 +298,29 @@ def test_refuse_invalid_local_identity_before_network(owner: str, device: str) -
                 signing_key=Ed25519PrivateKey.generate(),
             )
         )
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX no-follow required")
+def test_one_shot_tls_relay_delivers_only_owner_approved_presence(tmp_path: Path) -> None:
+    got = asyncio.run(_scenario(tmp_path, "approved-read"))
+    answer = next(item for item in got if item.startswith("answer:"))
+    result = json.loads(answer.removeprefix("answer:"))
+    assert result["kind"] == "connector.read_result"
+    assert result["sequence"] == 1
+    assert result["result"]["files"] == {
+        "projectPresent": True,
+        "boardPresent": False,
+        "schematicPresent": False,
+    }
+    assert "private contents" not in answer
+    assert "approved-project" not in answer
+
+
+@pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX no-follow required")
+@pytest.mark.parametrize("mode", ["denied-operation", "revoked", "wrong-session"])
+def test_one_shot_tls_relay_denies_native_revoked_or_unbound_request(
+    tmp_path: Path, mode: str
+) -> None:
+    got = asyncio.run(_scenario(tmp_path, mode))
+    assert "read_denied" in got
+    assert not any(item.startswith("answer:") for item in got)
