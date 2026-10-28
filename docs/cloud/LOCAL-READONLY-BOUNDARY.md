@@ -138,6 +138,16 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   and rejection of a second read. The browser approval and network
   transport are **synthetic fixtures**; this is **not** a production Cloud,
   real browser OAuth, or real-owner acceptance test.
+- `tests/cloud/test_enrollment_real_wss_integration.py` exercises the
+  **actual persisted browser-paired Ed25519 identity** through verified
+  localhost HTTPS-origin to a **real temporary CA-signed TLS WebSocket**
+  peer, checking both device/session challenge signatures and a single
+  `connector.read_result`/ACK with only three presence booleans. It uses
+  synthetic pairing HTTP responses and synthetic browser approval, plus a
+  disposable local KiCad file-presence fixture. Unlike the previous
+  local-only transport stub, the actual outbound WSS client and read
+  dispatcher execute; unlike a real owner acceptance, it exercises **no
+  signed-in OAuth user, production Cloud server, or production data**.
 - The local `tests/cloud/` suite is included in the full Python CI runner.
   For proportionate local validation, run
   `uv run --all-extras pytest -q tests/cloud/` and check the latest exact
