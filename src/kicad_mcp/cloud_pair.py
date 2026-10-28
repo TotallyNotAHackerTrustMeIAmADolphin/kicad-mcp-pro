@@ -55,6 +55,10 @@ def _origin(value: str) -> tuple[str, int, str]:
         if (
             parsed.scheme != "https"
             or not parsed.hostname
+            # Enrollment and the subsequent WSS session must accept the
+            # same origin set; a trailing DNS root dot is rejected by the
+            # signed-session endpoint and must not strand an enrolled key.
+            or parsed.hostname.endswith(".")
             or parsed.username is not None
             or parsed.password is not None
             or parsed.path not in ("", "/")

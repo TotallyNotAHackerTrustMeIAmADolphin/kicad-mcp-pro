@@ -285,6 +285,7 @@ def test_invalid_origin_never_creates_a_key(tmp_path: Path) -> None:
         "https://cloud.example?token=1",
         "https://localhost:bad",
         "https://localhost#fragment",
+        "https://localhost.",
     ]:
         keyfile = tmp_path / "no-key"
         with pytest.raises(cloud_pair.CloudPairingError):
