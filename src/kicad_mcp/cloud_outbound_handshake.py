@@ -173,6 +173,8 @@ async def establish_proof_only_handshake(
                     raise CloudHandshakeDeniedError("handshake denied")
                 await socket.send(json.dumps(signed, separators=(",", ":")))
                 raw_ready = await socket.recv()
+                if not isinstance(raw_ready, str):
+                    raise CloudHandshakeDeniedError("handshake denied")
                 ready = _read_strict_json(raw_ready, "connector.ready")
                 if (
                     set(ready) != {"kind", "version"}

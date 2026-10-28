@@ -108,6 +108,8 @@ async def _scenario(tmp_path: Path, mode: str = "success") -> list[str]:
             observations.append("session_verified")
             if mode == "bad-ready":
                 await ws.send('{"kind":"connector.ready","version":2}')
+            elif mode == "binary-ready":
+                await ws.send(b'{"kind":"connector.ready","version":1}')
             else:
                 await ws.send('{"kind":"connector.ready","version":1}')
         except Exception:
@@ -153,7 +155,14 @@ def test_secure_opt_in_real_wss_exchange(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "mode",
-    ["untrusted-ca", "wrong-host", "wrong-device", "premature-ready", "bad-ready"],
+    [
+        "untrusted-ca",
+        "wrong-host",
+        "wrong-device",
+        "premature-ready",
+        "bad-ready",
+        "binary-ready",
+    ],
 )
 def test_security_denies_without_unsafe_fallback(tmp_path: Path, mode: str) -> None:
     got = asyncio.run(_scenario(tmp_path, mode))
