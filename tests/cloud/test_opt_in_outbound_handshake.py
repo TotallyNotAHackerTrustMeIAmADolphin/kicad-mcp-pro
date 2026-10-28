@@ -291,6 +291,25 @@ def test_empty_query_or_fragment_delimiters_never_change_ws_path(origin: str) ->
         _endpoint(origin=origin, trusted_origin=origin)
 
 
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://local\thost:443",
+        "https://localhost:443\n",
+        "https://localhost:443/\r",
+        "https://localhost:443\x00",
+        "\x1fhttps://localhost:443",
+        "https://localhost:443\x7f",
+        "https://caf\u00e9.example",
+    ],
+)
+def test_url_parser_control_character_normalization_is_denied(origin: str) -> None:
+    # urlsplit silently strips CR/LF/tab. The WSS endpoint must never be
+    # assembled from those untrusted original bytes after parsing.
+    with pytest.raises(CloudHandshakeDeniedError):
+        _endpoint(origin=origin, trusted_origin=origin)
+
+
 def test_no_trust_verification_optout_even_for_localhost() -> None:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False

@@ -53,7 +53,13 @@ def _origin(value: str) -> tuple[str, int, str]:
     try:
         # urlsplit() loses empty query/fragment delimiters, so reject them
         # on the original input before storing an origin for future WSS use.
-        if not isinstance(value, str) or "?" in value or "#" in value:
+        if (
+            not isinstance(value, str)
+            or not value.isascii()
+            or any(ord(char) <= 0x20 or ord(char) == 0x7F for char in value)
+            or "?" in value
+            or "#" in value
+        ):
             raise CloudPairingError(_PAIRING_DENIED)
         parsed = urlsplit(value)
         if (

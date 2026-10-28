@@ -129,8 +129,11 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   pairing client and signed WSS connector reject origins with an empty
   query/fragment delimiter (`?` or `#`) before use; otherwise the appended
   WebSocket endpoint path would become a query or fragment. Enrollment also
-  rejects DNS names ending in a dot, which the WSS connector forbids. These
-  mismatches were reproduced as failing tests before correction. Pairing
+  rejects DNS names ending in a dot, which the WSS connector forbids. Both
+  entry points reject raw control/whitespace characters and non-ASCII origin
+  spellings before URL parsing, including CR/LF/tab that Python's URL parser
+  would silently remove and could otherwise alter the WebSocket request path.
+  These mismatches were reproduced as failing tests before correction. Pairing
   requests use verified HTTPS, bounded response size, **no redirects or
   automatic retries**. Owner keys use exclusive creation and mode 0600.
 - Only `project_summary` is accepted. Native KiCad execution, DRC/ERC,

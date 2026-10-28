@@ -53,8 +53,11 @@ def _endpoint(*, origin: str, trusted_origin: str) -> str:
     if (
         not isinstance(origin, str)
         or not isinstance(trusted_origin, str)
-        # Parsed empty delimiters are invisible to .query/.fragment, but
-        # concatenating the WSS path would put it in the wrong URL section.
+        or not origin.isascii()
+        or not trusted_origin.isascii()
+        # urllib.parse silently strips CR, LF, tab and leading C0 controls,
+        # while the WSS endpoint below uses the original untrusted bytes.
+        or any(ord(char) <= 0x20 or ord(char) == 0x7F for char in origin)
         or any(delimiter in value for value in (origin, trusted_origin) for delimiter in "?#")
     ):
         raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)

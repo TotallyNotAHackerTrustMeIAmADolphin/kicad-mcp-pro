@@ -290,6 +290,14 @@ def test_invalid_origin_never_creates_a_key(tmp_path: Path) -> None:
         "https://localhost#",
         "https://localhost/?",
         "https://localhost/#",
+        "https://local\thost",
+        "https://localhost\n",
+        "https://localhost/\r",
+        "https://localhost\x00",
+        " https://localhost",
+        "\x1fhttps://localhost",
+        "https://localhost\x7f",
+        "https://caf\u00e9.example",
     ]:
         keyfile = tmp_path / "no-key"
         with pytest.raises(cloud_pair.CloudPairingError):
