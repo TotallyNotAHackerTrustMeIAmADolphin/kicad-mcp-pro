@@ -18,6 +18,7 @@ SUITES = {
         "tests/unit/",
         "tests/integration/",
         "tests/e2e/",
+        "tests/cloud/",
         "-q",
         "-m",
         "not benchmark",
