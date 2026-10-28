@@ -151,8 +151,12 @@ async def _scenario(
             approval_clock["monotonic_ns"] += 30_000_000_000
             await ws.send('{"kind":"connector.ready","version":1}')
             pending_close = ws.recv()
-            with pytest.raises(ConnectionClosed):
+            try:
                 await asyncio.wait_for(pending_close, timeout=3)
+            except ConnectionClosed:
+                pass
+            else:
+                pytest.fail("expired local consent must close the WebSocket")
             observations.append("denied-before-summary")
             return
         await ws.send('{"kind":"connector.ready","version":1}')

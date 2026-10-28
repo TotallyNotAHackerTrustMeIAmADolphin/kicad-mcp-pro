@@ -321,15 +321,16 @@ def test_result_delivery_rechecks_grant_and_request_deadline(
         patch.object(subject, "_current_authorization", side_effect=lambda: active["grant"]),
         patch.object(subject, "_clock_ms", side_effect=lambda: active["now"]),
     ):
-        response = subject.read(packet(), sequence=1)
+        request = packet()
+        response = subject.read(request, sequence=1)
         assert response["requestId"] == REQUEST
         active["grant"] = False
         with pytest.raises(LocalReadDeniedError):
-            subject.assert_delivery_authorized(packet(), device_id=DEVICE, session_id=SESSION)
+            subject.assert_delivery_authorized(request, device_id=DEVICE, session_id=SESSION)
         active["grant"] = True
         active["now"] = NOW + 1_001
         with pytest.raises(LocalReadDeniedError):
-            subject.assert_delivery_authorized(packet(), device_id=DEVICE, session_id=SESSION)
+            subject.assert_delivery_authorized(request, device_id=DEVICE, session_id=SESSION)
 
 
 def test_revoke_after_inspection_but_before_reply_denies(
