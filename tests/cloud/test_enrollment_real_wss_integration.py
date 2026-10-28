@@ -14,16 +14,18 @@ import json
 import os
 import ssl
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from test_isolated_tls_websocket_handshake import _synthetic_tls
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
 
 from kicad_mcp import cloud_once, cloud_pair
-from kicad_mcp.cloud_outbound_handshake import execute_single_approved_read
+from kicad_mcp.cloud_outbound_handshake import HandshakeReceipt, execute_single_approved_read
 from kicad_mcp.cloud_read_dispatch import LocalReadDispatch
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Owner-only key binding is POSIX-only")
@@ -260,8 +262,24 @@ async def _scenario(
         assert keyfile.stat().st_mode & 0o777 == 0o600
         trust = ssl.create_default_context(cadata=ca_pem)
 
-        async def use_real_verified_transport(**kwargs: object):
-            return await execute_single_approved_read(**kwargs, tls_context=trust)
+        async def use_real_verified_transport(
+            *,
+            origin: str,
+            trusted_origin: str,
+            owner_sub: str,
+            device_id: str,
+            signing_key: Ed25519PrivateKey,
+            dispatcher_factory: Callable[[HandshakeReceipt], LocalReadDispatch],
+        ) -> HandshakeReceipt:
+            return await execute_single_approved_read(
+                origin=origin,
+                trusted_origin=trusted_origin,
+                owner_sub=owner_sub,
+                device_id=device_id,
+                signing_key=signing_key,
+                dispatcher_factory=dispatcher_factory,
+                tls_context=trust,
+            )
 
         monkeypatch.setattr(cloud_once, "execute_single_approved_read", use_real_verified_transport)
         monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
