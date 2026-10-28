@@ -19,6 +19,8 @@ MAX_FRAME_BYTES = 1024
 MAX_DEADLINE_MS = 30_000
 MAX_SESSION_REMAINING_MS = 300_000
 MAX_DIRECTORY_ENTRIES = 128
+_READ_DENIED = "request denied"
+
 _UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
     re.ASCII,
@@ -62,34 +64,34 @@ def _uuid(value: object) -> bool:
 
 def _pairs_unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
     if len({name for name, _ in pairs}) != len(pairs):
-        raise LocalReadDeniedError("request denied")
+        raise LocalReadDeniedError(_READ_DENIED)
     return dict(pairs)
 
 
 def _reject_constant(_: str) -> None:
-    raise LocalReadDeniedError("request denied")
+    raise LocalReadDeniedError(_READ_DENIED)
 
 
 def _validate_frame(
     frame: bytes, boundary: VerifiedLocalBinding, policy: OperatorProject, now_ms: int
 ) -> dict[str, object]:
     if not isinstance(frame, bytes) or not (1 <= len(frame) <= MAX_FRAME_BYTES):
-        raise LocalReadDeniedError("request denied")
+        raise LocalReadDeniedError(_READ_DENIED)
     if not isinstance(now_ms, int) or isinstance(now_ms, bool) or now_ms <= 0:
-        raise LocalReadDeniedError("request denied")
+        raise LocalReadDeniedError(_READ_DENIED)
     if not all(
         _uuid(n)
         for n in (boundary.device_id, boundary.project_id, policy.device_id, policy.project_id)
     ):
-        raise LocalReadDeniedError("request denied")
+        raise LocalReadDeniedError(_READ_DENIED)
     try:
         body = json.loads(
             frame.decode("utf-8"), object_pairs_hook=_pairs_unique, parse_constant=_reject_constant
         )
-    except (ValueError, UnicodeError, TypeError) as exc:
-        raise LocalReadDeniedError("request denied") from exc
+    except (ValueError, TypeError) as exc:
+        raise LocalReadDeniedError(_READ_DENIED) from exc
     if not isinstance(body, dict) or set(body) != _FIELDS:
-        raise LocalReadDeniedError("request denied")
+        raise LocalReadDeniedError(_READ_DENIED)
     deadline = body.get("deadlineUnixMs")
     operation = body.get("operation")
     if (
@@ -112,7 +114,7 @@ def _validate_frame(
             now_ms < deadline <= min(now_ms + MAX_DEADLINE_MS, boundary.session_expires_unix_ms)
         )
     ):
-        raise LocalReadDeniedError("request denied")
+        raise LocalReadDeniedError(_READ_DENIED)
     return body
 
 
@@ -123,12 +125,12 @@ def _open_operator_directory(folder: Path) -> int:
     dir_flag = getattr(os, "O_DIRECTORY", None)
     nofollow_flag = getattr(os, "O_NOFOLLOW", None)
     if os.name != "posix" or type(dir_flag) is not int or type(nofollow_flag) is not int:
-        raise LocalReadDeniedError("request denied")
+        raise LocalReadDeniedError(_READ_DENIED)
     # This is an owner-selected absolute directory, never a path supplied by
     # the Cloud request. Refuse lexical upward navigation before the openat
     # walk, even though O_NOFOLLOW already rejects symlink substitution.
     if not isinstance(folder, Path) or not folder.is_absolute():
-        raise LocalReadDeniedError("request denied")
+        raise LocalReadDeniedError(_READ_DENIED)
     components = folder.parts[1:]
     if (
         not components
@@ -138,7 +140,7 @@ def _open_operator_directory(folder: Path) -> int:
             for component in components
         )
     ):
-        raise LocalReadDeniedError("request denied")
+        raise LocalReadDeniedError(_READ_DENIED)
     flags = os.O_RDONLY | dir_flag | nofollow_flag
     descriptor = os.open("/", flags)
     try:
@@ -162,7 +164,7 @@ def _read_presence_only(policy: OperatorProject) -> dict[str, bool]:
         or not _NAME.fullmatch(policy.filename_stem)
         or policy.filename_stem in {".", ".."}
     ):
-        raise LocalReadDeniedError("request denied")
+        raise LocalReadDeniedError(_READ_DENIED)
     descriptor: int | None = None
     try:
         descriptor = _open_operator_directory(path)
@@ -172,7 +174,7 @@ def _read_presence_only(policy: OperatorProject) -> dict[str, bool]:
         with os.scandir(descriptor) as entries:
             for index, member in enumerate(entries):
                 if index >= MAX_DIRECTORY_ENTRIES:
-                    raise LocalReadDeniedError("request denied")
+                    raise LocalReadDeniedError(_READ_DENIED)
                 members.add(member.name)
         result: dict[str, bool] = {}
         for label, suffix in (
@@ -186,11 +188,11 @@ def _read_presence_only(policy: OperatorProject) -> dict[str, bool]:
                 continue
             entry = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
             if not stat.S_ISREG(entry.st_mode):
-                raise LocalReadDeniedError("request denied")
+                raise LocalReadDeniedError(_READ_DENIED)
             result[label] = True
         return result
     except (OSError, ValueError) as exc:
-        raise LocalReadDeniedError("request denied") from exc
+        raise LocalReadDeniedError(_READ_DENIED) from exc
     finally:
         if descriptor is not None:
             os.close(descriptor)

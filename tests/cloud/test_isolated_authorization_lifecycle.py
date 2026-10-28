@@ -190,8 +190,9 @@ def test_disabled_revoked_or_expired_fixture_denies(
 def test_claim_changes_and_nonsequential_requests_denied(
     target: OperatorProject, actor_change: dict[str, object]
 ) -> None:
+    _raise_argument_1 = SimulatedGrantState()
     with pytest.raises(LocalReadDeniedError):
-        deliver(SimulatedGrantState(), target, **actor_change)
+        deliver(_raise_argument_1, target, **actor_change)
 
 
 def test_grant_revocation_after_one_accepted_read_denies_next(
@@ -223,8 +224,9 @@ def test_grant_is_not_enough_to_authorize_other_project_or_drc(
         request(operation="run_drc"),
         request(operation="run_erc"),
     ):
+        _raise_argument_5 = SimulatedGrantState()
         with pytest.raises(LocalReadDeniedError):
-            deliver(SimulatedGrantState(), target, denied)
+            deliver(_raise_argument_5, target, denied)
 
 
 def test_operator_selected_local_directory_not_from_cloud(
@@ -233,12 +235,15 @@ def test_operator_selected_local_directory_not_from_cloud(
     foreign = tmp_path / "other"
     foreign.mkdir()
     wrong_policy = OperatorProject(DEVICE, "99999999-9999-4999-8999-999999999999", foreign, "x")
+    _raise_argument_2 = SimulatedGrantState()
     with pytest.raises(LocalReadDeniedError):
-        deliver(SimulatedGrantState(), wrong_policy)
+        deliver(_raise_argument_2, wrong_policy)
     tampered = json.loads(request())
     tampered["path"] = str(target.directory)
+    _raise_argument_3 = SimulatedGrantState()
+    _raise_argument_4 = json.dumps(tampered).encode()
     with pytest.raises(LocalReadDeniedError):
-        deliver(SimulatedGrantState(), target, json.dumps(tampered).encode())
+        deliver(_raise_argument_3, target, _raise_argument_4)
 
 
 def test_short_live_session_cannot_authorize_longer_request(

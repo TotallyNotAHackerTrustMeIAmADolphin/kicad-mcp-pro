@@ -8,7 +8,6 @@ Only an independently authenticated future transport may call these helpers.
 from __future__ import annotations
 
 import base64
-import binascii
 import json
 import re
 from typing import Literal
@@ -17,6 +16,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 MAX_CHALLENGE_BYTES = 1024
 MAX_CHALLENGE_LIFETIME_MS = 60_000
+_CHALLENGE_DENIED = "challenge denied"
+
 _UUID = re.compile(r"[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}")
 _BASE64URL_32 = re.compile(r"[A-Za-z0-9_-]{43}")
 _DEVICE_FIELDS = frozenset({"kind", "version", "challengeId", "deviceId", "nonce", "expiresAtMs"})
@@ -31,12 +32,12 @@ class OfflineProofDeniedError(ValueError):
 
 def _unique_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     if len({name for name, _ in pairs}) != len(pairs):
-        raise OfflineProofDeniedError("challenge denied")
+        raise OfflineProofDeniedError(_CHALLENGE_DENIED)
     return dict(pairs)
 
 
 def _reject_constant(_: str) -> None:
-    raise OfflineProofDeniedError("challenge denied")
+    raise OfflineProofDeniedError(_CHALLENGE_DENIED)
 
 
 def _uuid(value: object) -> bool:
@@ -48,7 +49,7 @@ def _canonical_32(value: object) -> bool:
         return False
     try:
         decoded = base64.urlsafe_b64decode(value + "=")
-    except (ValueError, binascii.Error):
+    except ValueError:
         return False
     return len(decoded) == 32 and base64.urlsafe_b64encode(decoded).decode().rstrip("=") == value
 
@@ -67,16 +68,16 @@ def _decode_challenge(
         or type(now_unix_ms) is not int
         or now_unix_ms <= 0
     ):
-        raise OfflineProofDeniedError("challenge denied")
+        raise OfflineProofDeniedError(_CHALLENGE_DENIED)
     try:
         parsed = json.loads(
             raw.decode("utf-8"), object_pairs_hook=_unique_keys, parse_constant=_reject_constant
         )
-    except (ValueError, UnicodeError, TypeError) as exc:
-        raise OfflineProofDeniedError("challenge denied") from exc
+    except (ValueError, TypeError) as exc:
+        raise OfflineProofDeniedError(_CHALLENGE_DENIED) from exc
     expected = _DEVICE_FIELDS if kind == "device.challenge" else _SESSION_FIELDS
     if not isinstance(parsed, dict) or set(parsed) != expected:
-        raise OfflineProofDeniedError("challenge denied")
+        raise OfflineProofDeniedError(_CHALLENGE_DENIED)
     expiry = parsed["expiresAtMs"]
     if (
         parsed["kind"] != kind
@@ -88,17 +89,17 @@ def _decode_challenge(
         or type(expiry) is not int
         or not (now_unix_ms < expiry <= now_unix_ms + MAX_CHALLENGE_LIFETIME_MS)
     ):
-        raise OfflineProofDeniedError("challenge denied")
+        raise OfflineProofDeniedError(_CHALLENGE_DENIED)
     if kind == "connector.session_challenge" and (
         not _uuid(parsed["sessionId"]) or not _canonical_32(parsed["binding"])
     ):
-        raise OfflineProofDeniedError("challenge denied")
+        raise OfflineProofDeniedError(_CHALLENGE_DENIED)
     return parsed
 
 
 def _sign(signing_key: Ed25519PrivateKey, payload: bytes) -> str:
     if not isinstance(signing_key, Ed25519PrivateKey):
-        raise OfflineProofDeniedError("challenge denied")
+        raise OfflineProofDeniedError(_CHALLENGE_DENIED)
     signature = signing_key.sign(payload)
     return base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
 

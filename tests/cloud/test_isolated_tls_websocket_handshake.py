@@ -78,7 +78,9 @@ def _synthetic_tls(tmp_path: Path) -> tuple[ssl.SSLContext, str]:
 
 def _decode_sig(frame: dict[str, object]) -> bytes:
     signature = frame["signature"]
-    assert isinstance(signature, str) and len(signature) == 86
+    assert isinstance(signature, str)
+    assert len(signature) == 86
+
     return base64.urlsafe_b64decode(signature + "==")
 
 
@@ -99,7 +101,9 @@ async def _verified_local_test_handshake(
         raise OfflineProofDeniedError("test-only destination denied")
     # TLS trust comes from the local test fixture, never from WS JSON.
     tls = ssl.create_default_context(cadata=trust_pem)
-    assert tls.verify_mode == ssl.CERT_REQUIRED and tls.check_hostname
+    assert tls.verify_mode == ssl.CERT_REQUIRED
+    assert tls.check_hostname
+
     async with asyncio.timeout(5):
         async with connect(
             url, ssl=tls, origin=None, compression=None, max_size=1024, open_timeout=3
@@ -282,5 +286,6 @@ def test_fail_closed_tls_identity_and_challenge_sequence(tmp_path: Path, mode: s
 )
 def test_test_harness_cannot_connect_to_external_cloud_or_other_paths(url: str) -> None:
     # Rejected before DNS, TCP, TLS, or any device signature is attempted.
+    _raise_argument_1 = _verified_local_test_handshake(url, "", Ed25519PrivateKey.generate())
     with pytest.raises(OfflineProofDeniedError):
-        asyncio.run(_verified_local_test_handshake(url, "", Ed25519PrivateKey.generate()))
+        asyncio.run(_raise_argument_1)

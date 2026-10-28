@@ -39,12 +39,14 @@ def test_missing_nofollow_flag_rejected_even_for_valid_request(tmp_path: Path) -
         separators=(",", ":"),
     ).encode("utf-8")
     with patch.object(os, "O_NOFOLLOW", None, create=True):
+        _raise_argument_1 = VerifiedLocalBinding(
+            DEVICE, PROJECT, frozenset({"project_summary"}), SESSION, NOW + 60000
+        )
+        _raise_argument_2 = OperatorProject(DEVICE, PROJECT, folder, "sample")
         with pytest.raises(LocalReadDeniedError):
             inspect_readonly(
                 frame,
-                verified=VerifiedLocalBinding(
-                    DEVICE, PROJECT, frozenset({"project_summary"}), SESSION, NOW + 60_000
-                ),
-                operator_project=OperatorProject(DEVICE, PROJECT, folder, "sample"),
+                verified=_raise_argument_1,
+                operator_project=_raise_argument_2,
                 now_unix_ms=NOW,
             )

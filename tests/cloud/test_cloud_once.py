@@ -55,8 +55,9 @@ def _args(folder: Path, key: Path) -> list[str]:
 
 
 def test_no_consent_flag_never_loads_a_key_or_connects(tmp_path: Path) -> None:
+    _raise_argument_1 = _args(tmp_path, tmp_path / "not-a-key")[:-1]
     with pytest.raises(SystemExit) as denied:
-        cloud_once.main(_args(tmp_path, tmp_path / "not-a-key")[:-1])
+        cloud_once.main(_raise_argument_1)
     assert denied.value.code == 2
 
 
@@ -114,8 +115,9 @@ def test_explicit_approval_uses_only_selected_project_and_file_presence(
         result = dispatcher.read(json.dumps(request).encode(), sequence=1)
         observations.append(json.dumps(result))
         dispatcher.close()
+        _raise_argument_2 = json.dumps(request).encode()
         with pytest.raises(LocalReadDeniedError):
-            dispatcher.read(json.dumps(request).encode(), sequence=2)
+            dispatcher.read(_raise_argument_2, sequence=2)
         return receipt
 
     monkeypatch.setattr(cloud_once, "execute_single_approved_read", fake_cloud)

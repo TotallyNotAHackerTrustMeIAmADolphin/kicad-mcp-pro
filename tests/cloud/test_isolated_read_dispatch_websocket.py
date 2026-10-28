@@ -220,7 +220,9 @@ async def _exercise(tmp_path: Path, *, forbidden: bool) -> dict[str, object]:
 
 def test_tls_signed_session_then_only_presence_is_delivered(tmp_path: Path) -> None:
     result = asyncio.run(_exercise(tmp_path, forbidden=False))
-    assert result["first_proof"] and result["session_proof"]
+    assert result["first_proof"]
+    assert result["session_proof"]
+
     response = result["sanitized"]
     assert isinstance(response, dict)
     assert response["files"] == {
@@ -234,6 +236,8 @@ def test_tls_signed_session_then_only_presence_is_delivered(tmp_path: Path) -> N
 
 def test_tls_signed_session_still_denies_remote_native_command(tmp_path: Path) -> None:
     result = asyncio.run(_exercise(tmp_path, forbidden=True))
-    assert result["first_proof"] and result["session_proof"]
+    assert result["first_proof"]
+    assert result["session_proof"]
+
     assert result["no_native_response"]
     assert "sanitized" not in result

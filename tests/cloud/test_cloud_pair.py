@@ -43,7 +43,9 @@ def test_pairing_exact_payload_and_owner_review(
                 "deviceFingerprint": hashlib.sha256(der).hexdigest(),
                 "expiresAtMs": time.time_ns() // 1_000_000 + 60_000,
             }
-        assert path.endswith("/redeem") and status == 200
+        assert path.endswith("/redeem")
+        assert status == 200
+
         assert seen == ["challenge", "browser_approved"]
         assert data["challengeId"] == CHALLENGE
         assert data["deviceCode"] == SECRET
@@ -62,7 +64,9 @@ def test_pairing_exact_payload_and_owner_review(
 
     def approve(page: str, challenge: str, code: str) -> None:
         assert page == "https://localhost/devices/pairing"
-        assert challenge == CHALLENGE and code == "ABCDEF-123456"
+        assert challenge == CHALLENGE
+        assert code == "ABCDEF-123456"
+
         seen.append("browser_approved")
 
     device, fingerprint = cloud_pair.enroll(
@@ -311,7 +315,9 @@ def test_https_pairing_post_sends_only_expected_json_and_refuses_oversize(
             assert options["ssl_context"].check_hostname is True
 
         def request(self, method: str, path: str, **options: object) -> Response:
-            assert method == "POST" and path == "/api/v1/pairing/device/challenge"
+            assert method == "POST"
+            assert path == "/api/v1/pairing/device/challenge"
+
             body = options["body"]
             assert isinstance(body, bytes)
             assert b"secret" not in body
@@ -373,7 +379,9 @@ def test_cli_requires_explicit_consent_and_reports_disabled_device(
     monkeypatch.setattr(cloud_pair, "enroll", authorized)
     assert cloud_pair.main([*options, "--begin-pairing"]) == 0
     output = capsys.readouterr().out
-    assert DEVICE in output and "enabled: false" in output
+    assert DEVICE in output
+    assert "enabled: false" in output
+
     assert received == ["https://localhost", "Fixture", tmp_path / "owner.pem"]
 
     def rejected(*_: object) -> tuple[str, str]:

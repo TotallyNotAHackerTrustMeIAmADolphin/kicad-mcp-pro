@@ -78,8 +78,9 @@ def test_only_metadata_returned_and_no_write(subject: LocalReadDispatch) -> None
 def test_replay_and_out_of_order_denied(subject: LocalReadDispatch) -> None:
     assert subject.read(packet(), sequence=1)
     for seq in (1, 3, True, 0, -1, 1.0):
+        _raise_argument_8 = packet()
         with pytest.raises(LocalReadDeniedError):
-            subject.read(packet(), sequence=seq)
+            subject.read(_raise_argument_8, sequence=seq)
     assert subject.read(packet("55555555-5555-4555-8555-555555555555"), sequence=2)
 
 
@@ -99,8 +100,9 @@ def test_denial_consumes_sequence_and_never_executes(
 ) -> None:
     with pytest.raises(LocalReadDeniedError):
         subject.read(bad, sequence=1)
+    _raise_argument_1 = packet()
     with pytest.raises(LocalReadDeniedError):
-        subject.read(packet(), sequence=1)
+        subject.read(_raise_argument_1, sequence=1)
     assert subject.read(packet("55555555-5555-4555-8555-555555555555"), sequence=2)
 
 
@@ -108,15 +110,17 @@ def test_close_is_permanent(subject: LocalReadDispatch) -> None:
     assert subject.read(packet(), sequence=1)
     subject.close()
     subject.close()
+    _raise_argument_2 = packet()
     with pytest.raises(LocalReadDeniedError):
-        subject.read(packet(), sequence=2)
+        subject.read(_raise_argument_2, sequence=2)
 
 
 def test_session_request_budget(subject: LocalReadDispatch) -> None:
     for n in range(1, MAX_READS_PER_SESSION + 1):
         assert subject.read(packet(f"{n:08x}-3333-4333-8333-333333333333"), sequence=n)
+    _raise_argument_3 = packet()
     with pytest.raises(LocalReadDeniedError):
-        subject.read(packet(), sequence=MAX_READS_PER_SESSION + 1)
+        subject.read(_raise_argument_3, sequence=MAX_READS_PER_SESSION + 1)
 
 
 def test_expiry_between_start_and_return_denied(tmp_path: Path) -> None:
@@ -131,8 +135,9 @@ def test_expiry_between_start_and_return_denied(tmp_path: Path) -> None:
         current_authorization=lambda: True,
         clock_ms=lambda: next(now),
     )
+    _raise_argument_4 = packet()
     with pytest.raises(LocalReadDeniedError):
-        subject.read(packet(), sequence=1)
+        subject.read(_raise_argument_4, sequence=1)
 
 
 def test_close_race_drops_in_flight_result(subject: LocalReadDispatch) -> None:
@@ -163,14 +168,16 @@ def test_close_race_drops_in_flight_result(subject: LocalReadDispatch) -> None:
         thread.start()
         try:
             assert inspecting.wait(timeout=4)
+            _raise_argument_13 = packet()
             with pytest.raises(LocalReadDeniedError):
-                subject.read(packet(), sequence=2)
+                subject.read(_raise_argument_13, sequence=2)
             subject.close()
         finally:
             resume.set()
             thread.join(timeout=4)
     assert not thread.is_alive()
-    assert len(failures) == 1 and isinstance(failures[0], LocalReadDeniedError)
+    assert len(failures) == 1
+    assert isinstance(failures[0], LocalReadDeniedError)
 
 
 def test_unexpected_inspection_error_releases_busy_state(subject: LocalReadDispatch) -> None:
@@ -178,8 +185,9 @@ def test_unexpected_inspection_error_releases_busy_state(subject: LocalReadDispa
         "kicad_mcp.cloud_read_dispatch.inspect_readonly",
         side_effect=LocalReadDeniedError("request denied"),
     ):
+        _raise_argument_9 = packet()
         with pytest.raises(LocalReadDeniedError):
-            subject.read(packet(), sequence=1)
+            subject.read(_raise_argument_9, sequence=1)
     assert subject.read(packet("55555555-5555-4555-8555-555555555555"), sequence=2)
 
 
@@ -187,8 +195,9 @@ def test_reused_request_id_denied_with_correct_next_sequence(
     subject: LocalReadDispatch,
 ) -> None:
     assert subject.read(packet(), sequence=1)
+    _raise_argument_5 = packet()
     with pytest.raises(LocalReadDeniedError):
-        subject.read(packet(), sequence=2)
+        subject.read(_raise_argument_5, sequence=2)
     # A duplicate has consumed sequence 2; a fresh ID at sequence 3 still works.
     assert subject.read(packet("55555555-5555-4555-8555-555555555555"), sequence=3)
 
@@ -198,8 +207,9 @@ def test_revoked_grant_before_first_read_denies_without_touching_project(
 ) -> None:
     with patch.object(subject, "_current_authorization", return_value=False):
         with patch("kicad_mcp.cloud_read_dispatch.inspect_readonly") as inspector:
+            _raise_argument_14 = packet()
             with pytest.raises(LocalReadDeniedError):
-                subject.read(packet(), sequence=1)
+                subject.read(_raise_argument_14, sequence=1)
             inspector.assert_not_called()
 
 
@@ -207,20 +217,24 @@ def test_bad_or_failing_grant_supplier_denied(
     subject: LocalReadDispatch,
 ) -> None:
     with patch.object(subject, "_current_authorization", return_value=1):
+        _raise_argument_10 = packet()
         with pytest.raises(LocalReadDeniedError):
-            subject.read(packet(), sequence=1)
+            subject.read(_raise_argument_10, sequence=1)
     with patch.object(subject, "_current_authorization", side_effect=RuntimeError("denied")):
+        _raise_argument_11 = packet()
         with pytest.raises(LocalReadDeniedError, match="request denied"):
-            subject.read(packet(), sequence=2)
+            subject.read(_raise_argument_11, sequence=2)
 
 
 def test_missing_grant_supplier_fails_closed(tmp_path: Path) -> None:
+    _raise_argument_6 = VerifiedLocalBinding(
+        DEVICE, PROJECT, frozenset({"project_summary"}), SESSION, NOW + 60000
+    )
+    _raise_argument_7 = OperatorProject(DEVICE, PROJECT, tmp_path, "board")
     with pytest.raises(LocalReadDeniedError):
         LocalReadDispatch(
-            verified=VerifiedLocalBinding(
-                DEVICE, PROJECT, frozenset({"project_summary"}), SESSION, NOW + 60_000
-            ),
-            operator_project=OperatorProject(DEVICE, PROJECT, tmp_path, "board"),
+            verified=_raise_argument_6,
+            operator_project=_raise_argument_7,
             current_authorization=None,  # type: ignore[arg-type]
             clock_ms=lambda: NOW,
         )
@@ -265,7 +279,8 @@ def test_revoke_while_inspecting_drops_metadata_even_if_socket_stays_open(
                 thread.join(timeout=4)
     assert not thread.is_alive()
     assert delivered == []
-    assert len(denied) == 1 and isinstance(denied[0], LocalReadDeniedError)
+    assert len(denied) == 1
+    assert isinstance(denied[0], LocalReadDeniedError)
 
 
 def test_revoke_after_inspection_but_before_reply_denies(
@@ -279,6 +294,7 @@ def test_revoke_after_inspection_but_before_reply_denies(
         return grants_checked == 1
 
     with patch.object(subject, "_current_authorization", side_effect=revoke_on_second_check):
+        _raise_argument_12 = packet()
         with pytest.raises(LocalReadDeniedError):
-            subject.read(packet(), sequence=1)
+            subject.read(_raise_argument_12, sequence=1)
     assert grants_checked == 2

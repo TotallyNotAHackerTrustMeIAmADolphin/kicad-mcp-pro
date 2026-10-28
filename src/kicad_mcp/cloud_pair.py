@@ -31,6 +31,9 @@ from cryptography.hazmat.primitives.serialization import (
 
 from kicad_mcp.cloud_once import _load_owner_key, _open_owner_private_dir
 
+_PAIRING_DENIED = "pairing denied"
+_JSON_MEDIA_TYPE = "application/json"
+
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 _USER_CODE = re.compile(r"[A-Z0-9]{6}-[A-Z0-9]{6}")
 _BASE64URL_32 = re.compile(r"[A-Za-z0-9_-]{43}")
@@ -55,12 +58,12 @@ def _origin(value: str) -> tuple[str, int, str]:
             or not parsed.netloc.isascii()
             or parsed.port == 0
         ):
-            raise CloudPairingError("pairing denied")
+            raise CloudPairingError(_PAIRING_DENIED)
         port = parsed.port or 443
         host = parsed.hostname
         return host, port, f"https://{parsed.netloc}"
     except ValueError as exc:
-        raise CloudPairingError("pairing denied") from exc
+        raise CloudPairingError(_PAIRING_DENIED) from exc
 
 
 def _post(
@@ -68,7 +71,7 @@ def _post(
 ) -> dict[str, object]:
     data = json.dumps(body, separators=(",", ":")).encode("utf-8")
     if len(data) > 1024:
-        raise CloudPairingError("pairing denied")
+        raise CloudPairingError(_PAIRING_DENIED)
     # urllib3 is a direct runtime dependency. A dedicated pool is never shared
     # with untrusted origins; TLS hostname/CA verification is mandatory.
     tls = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
@@ -90,7 +93,7 @@ def _post(
             "POST",
             path,
             body=data,
-            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            headers={"Content-Type": _JSON_MEDIA_TYPE, "Accept": _JSON_MEDIA_TYPE},
             retries=False,
             redirect=False,
             preload_content=False,
@@ -100,17 +103,17 @@ def _post(
             if (
                 response.status != status
                 or len(payload) > 2048
-                or response.headers.get("Content-Type", "").split(";")[0] != "application/json"
+                or response.headers.get("Content-Type", "").split(";")[0] != _JSON_MEDIA_TYPE
             ):
-                raise CloudPairingError("pairing denied")
+                raise CloudPairingError(_PAIRING_DENIED)
             decoded = json.loads(payload)
             if not isinstance(decoded, dict):
-                raise CloudPairingError("pairing denied")
+                raise CloudPairingError(_PAIRING_DENIED)
             return decoded
         finally:
             response.release_conn()
-    except (urllib3.exceptions.HTTPError, OSError, ValueError, UnicodeError) as exc:
-        raise CloudPairingError("pairing denied") from exc
+    except (urllib3.exceptions.HTTPError, OSError, ValueError) as exc:
+        raise CloudPairingError(_PAIRING_DENIED) from exc
     finally:
         pool.close()
 
@@ -119,11 +122,11 @@ def _create_private_key(path: Path) -> Ed25519PrivateKey:
     """Exclusive 0600 owner key inside a pinned 0700 directory, never a symlink."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
     if not isinstance(nofollow, int):
-        raise CloudPairingError("pairing denied")
+        raise CloudPairingError(_PAIRING_DENIED)
     try:
         directory_fd = _open_owner_private_dir(path)
     except (OSError, ValueError) as exc:
-        raise CloudPairingError("pairing denied") from exc
+        raise CloudPairingError(_PAIRING_DENIED) from exc
     try:
         key = Ed25519PrivateKey.generate()
         data = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
@@ -145,7 +148,7 @@ def _create_private_key(path: Path) -> Ed25519PrivateKey:
             raise
         return key
     except (OSError, ValueError) as exc:
-        raise CloudPairingError("pairing denied") from exc
+        raise CloudPairingError(_PAIRING_DENIED) from exc
     finally:
         os.close(directory_fd)
 
@@ -154,21 +157,21 @@ def _load_or_create(path: Path) -> Ed25519PrivateKey:
     try:
         parent_fd = _open_owner_private_dir(path)
     except (OSError, ValueError) as exc:
-        raise CloudPairingError("pairing denied") from exc
+        raise CloudPairingError(_PAIRING_DENIED) from exc
     os.close(parent_fd)
     if path.is_symlink():
-        raise CloudPairingError("pairing denied")
+        raise CloudPairingError(_PAIRING_DENIED)
     if path.exists():
         try:
             return _load_owner_key(path)
         except (OSError, ValueError) as exc:
-            raise CloudPairingError("pairing denied") from exc
+            raise CloudPairingError(_PAIRING_DENIED) from exc
     return _create_private_key(path)
 
 
 def _challenge(result: dict[str, object], key: Ed25519PrivateKey) -> tuple[str, str, str, str, int]:
     if set(result) != {"challengeId", "userCode", "deviceCode", "deviceFingerprint", "expiresAtMs"}:
-        raise CloudPairingError("pairing denied")
+        raise CloudPairingError(_PAIRING_DENIED)
     challenge, code, secret, fingerprint, expiry = (
         result["challengeId"],
         result["userCode"],
@@ -191,7 +194,7 @@ def _challenge(result: dict[str, object], key: Ed25519PrivateKey) -> tuple[str, 
         or type(expiry) is not int
         or not (time.time_ns() // 1_000_000 < expiry <= time.time_ns() // 1_000_000 + 300_000)
     ):
-        raise CloudPairingError("pairing denied")
+        raise CloudPairingError(_PAIRING_DENIED)
     return challenge, code, secret, fingerprint, expiry
 
 
@@ -199,7 +202,7 @@ def enroll(
     origin: str, alias: str, keyfile: Path, approval: Callable[[str, str, str], None]
 ) -> tuple[str, str]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}", alias):
-        raise CloudPairingError("pairing denied")
+        raise CloudPairingError(_PAIRING_DENIED)
     target = _origin(origin)
     key = _load_or_create(keyfile)
     der = key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
@@ -215,7 +218,7 @@ def enroll(
     challenge, code, device_secret, fingerprint, expiry = _challenge(result, key)
     approval(target[2] + "/devices/pairing", challenge, code)
     if time.time_ns() // 1_000_000 >= expiry:
-        raise CloudPairingError("pairing denied")
+        raise CloudPairingError(_PAIRING_DENIED)
     proof = (
         b"kicad-cloud-pairing-proof-v1\x00" + challenge.encode() + b"\x00" + device_secret.encode()
     )
@@ -237,7 +240,7 @@ def enroll(
         or answer["deviceFingerprint"] != fingerprint
         or answer["enabled"] is not False
     ):
-        raise CloudPairingError("pairing denied")
+        raise CloudPairingError(_PAIRING_DENIED)
     return answer["deviceId"], fingerprint
 
 

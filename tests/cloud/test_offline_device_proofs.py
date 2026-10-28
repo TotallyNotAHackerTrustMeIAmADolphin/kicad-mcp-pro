@@ -71,8 +71,10 @@ def test_device_proof_matches_cloud_domain_separation(key: Ed25519PrivateKey) ->
         + NONCE.encode()
     )
     key.public_key().verify(signature_bytes(response), expected)
+    _raise_argument_1 = key.public_key()
+    _raise_argument_2 = signature_bytes(response)
     with pytest.raises(InvalidSignature):
-        key.public_key().verify(signature_bytes(response), expected + b"changed")
+        _raise_argument_1.verify(_raise_argument_2, expected + b"changed")
 
 
 def test_session_proof_matches_cloud_domain_separation(key: Ed25519PrivateKey) -> None:
@@ -103,8 +105,10 @@ def test_session_proof_matches_cloud_domain_separation(key: Ed25519PrivateKey) -
         expected.replace(DEVICE.encode(), OTHER.encode()),
         b"kicad-cloud-device-handshake-v1\0" + expected,
     ):
+        _raise_argument_9 = key.public_key()
+        _raise_argument_10 = signature_bytes(response)
         with pytest.raises(InvalidSignature):
-            key.public_key().verify(signature_bytes(response), modified)
+            _raise_argument_9.verify(_raise_argument_10, modified)
 
 
 @pytest.mark.parametrize(
@@ -126,9 +130,10 @@ def test_session_proof_matches_cloud_domain_separation(key: Ed25519PrivateKey) -
 def test_bad_device_challenge_fails_without_signing(
     key: Ed25519PrivateKey, change: dict[str, object]
 ) -> None:
+    _raise_argument_3 = packet(**change)
     with pytest.raises(OfflineProofDeniedError):
         sign_device_challenge(
-            packet(**change), expected_device_id=DEVICE, now_unix_ms=NOW, signing_key=key
+            _raise_argument_3, expected_device_id=DEVICE, now_unix_ms=NOW, signing_key=key
         )
 
 
@@ -149,9 +154,10 @@ def test_bad_device_challenge_fails_without_signing(
 def test_bad_session_challenge_fails_without_signing(
     key: Ed25519PrivateKey, change: dict[str, object]
 ) -> None:
+    _raise_argument_4 = packet("connector.session_challenge", **change)
     with pytest.raises(OfflineProofDeniedError):
         sign_session_challenge(
-            packet("connector.session_challenge", **change),
+            _raise_argument_4,
             expected_device_id=DEVICE,
             now_unix_ms=NOW,
             signing_key=key,
@@ -187,8 +193,10 @@ def test_proof_is_bound_to_key_identity(key: Ed25519PrivateKey) -> None:
         + b"\0"
         + (DEVICE + "\0" + NONCE).encode()
     )
+    _raise_argument_5 = other.public_key()
+    _raise_argument_6 = signature_bytes(signed)
     with pytest.raises(InvalidSignature):
-        other.public_key().verify(signature_bytes(signed), expected)
+        _raise_argument_5.verify(_raise_argument_6, expected)
 
 
 def test_device_session_signatures_do_not_reuse_same_domain(key: Ed25519PrivateKey) -> None:
@@ -257,10 +265,12 @@ def test_spki_public_key_format_matches_cloud_credential_verifier(
 
 
 def test_invalid_private_key_reference_refused_before_signing() -> None:
+    _raise_argument_7 = packet()
+    _raise_argument_8 = object()
     with pytest.raises(OfflineProofDeniedError):
         sign_device_challenge(
-            packet(),
+            _raise_argument_7,
             expected_device_id=DEVICE,
             now_unix_ms=NOW,
-            signing_key=object(),  # type: ignore[arg-type]
+            signing_key=_raise_argument_8,  # type: ignore[arg-type]
         )

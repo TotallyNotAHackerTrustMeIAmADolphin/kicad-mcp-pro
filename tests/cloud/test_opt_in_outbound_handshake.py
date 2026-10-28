@@ -212,7 +212,9 @@ async def _scenario(tmp_path: Path, mode: str = "success") -> list[str]:
             observations.append("denied")
         else:
             assert mode in {"success", "approved-read"}, "a negative scenario was admitted"
-            assert receipt.device_id == DEVICE and receipt.session_id == SESSION
+            assert receipt.device_id == DEVICE
+            assert receipt.session_id == SESSION
+
             if mode == "success":
                 observations.append("completed")
     return observations
@@ -261,33 +263,31 @@ def test_security_denies_without_unsafe_fallback(tmp_path: Path, mode: str) -> N
     ],
 )
 def test_refuse_untrusted_or_malformed_origin_before_network(origin: str) -> None:
+    _raise_argument_1 = establish_proof_only_handshake(
+        origin=origin,
+        trusted_origin="https://localhost:444",
+        owner_sub=OWNER,
+        device_id=DEVICE,
+        signing_key=Ed25519PrivateKey.generate(),
+    )
     with pytest.raises(CloudHandshakeDeniedError):
-        asyncio.run(
-            establish_proof_only_handshake(
-                origin=origin,
-                trusted_origin="https://localhost:444",
-                owner_sub=OWNER,
-                device_id=DEVICE,
-                signing_key=Ed25519PrivateKey.generate(),
-            )
-        )
+        asyncio.run(_raise_argument_1)
 
 
 def test_no_trust_verification_optout_even_for_localhost() -> None:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.check_hostname = False
     context.verify_mode = ssl.CERT_NONE
+    _raise_argument_2 = establish_proof_only_handshake(
+        origin="https://localhost:445",
+        trusted_origin="https://localhost:445",
+        owner_sub=OWNER,
+        device_id=DEVICE,
+        signing_key=Ed25519PrivateKey.generate(),
+        tls_context=context,
+    )
     with pytest.raises(CloudHandshakeDeniedError):
-        asyncio.run(
-            establish_proof_only_handshake(
-                origin="https://localhost:445",
-                trusted_origin="https://localhost:445",
-                owner_sub=OWNER,
-                device_id=DEVICE,
-                signing_key=Ed25519PrivateKey.generate(),
-                tls_context=context,
-            )
-        )
+        asyncio.run(_raise_argument_2)
 
 
 @pytest.mark.parametrize(
@@ -302,16 +302,15 @@ def test_no_trust_verification_optout_even_for_localhost() -> None:
     ],
 )
 def test_refuse_invalid_local_identity_before_network(owner: str, device: str) -> None:
+    _raise_argument_3 = establish_proof_only_handshake(
+        origin="https://localhost:445",
+        trusted_origin="https://localhost:445",
+        owner_sub=owner,
+        device_id=device,
+        signing_key=Ed25519PrivateKey.generate(),
+    )
     with pytest.raises(CloudHandshakeDeniedError):
-        asyncio.run(
-            establish_proof_only_handshake(
-                origin="https://localhost:445",
-                trusted_origin="https://localhost:445",
-                owner_sub=owner,
-                device_id=device,
-                signing_key=Ed25519PrivateKey.generate(),
-            )
-        )
+        asyncio.run(_raise_argument_3)
 
 
 @pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX no-follow required")

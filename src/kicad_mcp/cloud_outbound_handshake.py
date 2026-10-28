@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from urllib.parse import urlsplit
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import WebSocketException
 
 from kicad_mcp.cloud_device_proofs import (
@@ -28,6 +28,8 @@ from kicad_mcp.cloud_device_proofs import (
 from kicad_mcp.cloud_read_dispatch import LocalReadDispatch
 
 CONNECTOR_WS_PATH = "/api/v1/connector/ws"
+_HANDSHAKE_DENIED = "handshake denied"
+
 _DEVICE_UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
 )
@@ -49,7 +51,7 @@ class HandshakeReceipt:
 def _endpoint(*, origin: str, trusted_origin: str) -> str:
     """Require exact independently configured HTTPS Cloud origin."""
     if not isinstance(origin, str) or not isinstance(trusted_origin, str):
-        raise CloudHandshakeDeniedError("handshake denied")
+        raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
     parsed = urlsplit(origin)
     expected = urlsplit(trusted_origin)
     for item in (parsed, expected):
@@ -63,14 +65,14 @@ def _endpoint(*, origin: str, trusted_origin: str) -> str:
             or item.fragment
             or item.hostname.endswith(".")
         ):
-            raise CloudHandshakeDeniedError("handshake denied")
+            raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
         try:
             if item.port is not None and not (1 <= item.port <= 65535):
-                raise CloudHandshakeDeniedError("handshake denied")
+                raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
         except ValueError as exc:
-            raise CloudHandshakeDeniedError("handshake denied") from exc
+            raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED) from exc
     if origin != trusted_origin or not origin.startswith("https://"):
-        raise CloudHandshakeDeniedError("handshake denied")
+        raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
     # Use the checked original URL with a scheme swap; it cannot contain
     # embedded credentials, redirects, query parameters or another path.
     return "wss://" + origin[len("https://") :].rstrip("/") + CONNECTOR_WS_PATH
@@ -78,14 +80,82 @@ def _endpoint(*, origin: str, trusted_origin: str) -> str:
 
 def _read_strict_json(raw: str, expected_kind: str) -> dict[str, object]:
     if not isinstance(raw, str) or len(raw.encode("utf-8")) > 1024:
-        raise CloudHandshakeDeniedError("handshake denied")
+        raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
     try:
         message = json.loads(raw, object_pairs_hook=_unique_keys)
-    except (UnicodeError, ValueError, TypeError) as exc:
-        raise CloudHandshakeDeniedError("handshake denied") from exc
+    except (ValueError, TypeError) as exc:
+        raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED) from exc
     if not isinstance(message, dict) or message.get("kind") != expected_kind:
-        raise CloudHandshakeDeniedError("handshake denied")
+        raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
     return message
+
+
+async def _complete_authorized_read(
+    socket: ClientConnection,
+    receipt: HandshakeReceipt,
+    dispatcher_factory: Callable[[HandshakeReceipt], LocalReadDispatch] | None,
+) -> HandshakeReceipt:
+    """Complete exactly one owner-approved read, or exit after proof-only mode."""
+    device_id = receipt.device_id
+    session_id = receipt.session_id
+    if dispatcher_factory is None:
+        # Proof-only mode retains its original no-command behavior.
+        return receipt
+    # The caller, not Cloud wire claims, supplies this independent
+    # local authorization and owner-approved project selection.
+    dispatcher = dispatcher_factory(receipt)
+    if not isinstance(dispatcher, LocalReadDispatch):
+        raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+    try:
+        dispatcher.assert_transport_session(device_id=device_id, session_id=session_id)
+        raw_request = await socket.recv()
+        if not isinstance(raw_request, str):
+            raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+        envelope = _read_strict_json(raw_request, "connector.authorized_read")
+        if (
+            set(envelope) != {"kind", "version", "sequence", "request"}
+            or type(envelope["version"]) is not int
+            or envelope["version"] != 1
+            or type(envelope["sequence"]) is not int
+            or not isinstance(envelope["request"], dict)
+        ):
+            raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+        request_bytes = json.dumps(
+            envelope["request"], separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        # read() fences replay, local path, expiry, and real-time
+        # authorization; no native KiCad operation is exposed.
+        response = await asyncio.to_thread(
+            dispatcher.read, request_bytes, sequence=envelope["sequence"]
+        )
+        dispatcher.assert_transport_session(device_id=device_id, session_id=session_id)
+        await socket.send(
+            json.dumps(
+                {
+                    "kind": "connector.read_result",
+                    "version": 1,
+                    "sequence": envelope["sequence"],
+                    "result": response,
+                },
+                separators=(",", ":"),
+            )
+        )
+        raw_ack = await socket.recv()
+        if not isinstance(raw_ack, str):
+            raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+        ack = _read_strict_json(raw_ack, "connector.read_ack")
+        if (
+            set(ack) != {"kind", "version", "sequence", "requestId"}
+            or type(ack["version"]) is not int
+            or ack["version"] != 1
+            or type(ack["sequence"]) is not int
+            or ack["sequence"] != envelope["sequence"]
+            or ack["requestId"] != response["requestId"]
+        ):
+            raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+        return receipt
+    finally:
+        dispatcher.close()
 
 
 async def _perform_outbound_session(
@@ -114,21 +184,22 @@ async def _perform_outbound_session(
         or _DEVICE_UUID.fullmatch(device_id) is None
         or not isinstance(signing_key, Ed25519PrivateKey)
     ):
-        raise CloudHandshakeDeniedError("handshake denied")
+        raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
     context = tls_context if tls_context is not None else ssl.create_default_context()
     if (
         not isinstance(context, ssl.SSLContext)
         or context.verify_mode != ssl.CERT_REQUIRED
         or not context.check_hostname
     ):
-        raise CloudHandshakeDeniedError("handshake denied")
+        raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
 
     def now_ms() -> int:
         return int(datetime.now(UTC).timestamp() * 1000)
 
     try:
-        async with asyncio.timeout(HANDSHAKE_TIMEOUT_SECONDS if dispatcher_factory is None else 40):
-            async with connect(
+        async with (
+            asyncio.timeout(HANDSHAKE_TIMEOUT_SECONDS if dispatcher_factory is None else 40),
+            connect(
                 endpoint,
                 ssl=context,
                 origin=None,
@@ -137,115 +208,59 @@ async def _perform_outbound_session(
                 max_queue=2,
                 open_timeout=3,
                 close_timeout=2,
-            ) as socket:
-                if socket.transport.get_extra_info("ssl_object") is None:
-                    raise CloudHandshakeDeniedError("handshake denied")
-                await socket.send(
-                    json.dumps(
-                        {
-                            "kind": "device.hello",
-                            "version": 1,
-                            "ownerSub": owner_sub,
-                            "deviceId": device_id,
-                        },
-                        separators=(",", ":"),
-                    )
+            ) as socket,
+        ):
+            if socket.transport.get_extra_info("ssl_object") is None:
+                raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+            await socket.send(
+                json.dumps(
+                    {
+                        "kind": "device.hello",
+                        "version": 1,
+                        "ownerSub": owner_sub,
+                        "deviceId": device_id,
+                    },
+                    separators=(",", ":"),
                 )
-                challenge = await socket.recv()
-                if not isinstance(challenge, str):
-                    raise CloudHandshakeDeniedError("handshake denied")
-                proof = sign_device_challenge(
-                    challenge.encode(),
-                    expected_device_id=device_id,
-                    now_unix_ms=now_ms(),
-                    signing_key=signing_key,
-                )
-                await socket.send(json.dumps(proof, separators=(",", ":")))
-                session = await socket.recv()
-                if not isinstance(session, str):
-                    raise CloudHandshakeDeniedError("handshake denied")
-                signed = sign_session_challenge(
-                    session.encode(),
-                    expected_device_id=device_id,
-                    now_unix_ms=now_ms(),
-                    signing_key=signing_key,
-                )
-                accepted_session = _read_strict_json(session, "connector.session_challenge")
-                session_id = accepted_session["sessionId"]
-                if not isinstance(session_id, str):
-                    raise CloudHandshakeDeniedError("handshake denied")
-                await socket.send(json.dumps(signed, separators=(",", ":")))
-                raw_ready = await socket.recv()
-                if not isinstance(raw_ready, str):
-                    raise CloudHandshakeDeniedError("handshake denied")
-                ready = _read_strict_json(raw_ready, "connector.ready")
-                if (
-                    set(ready) != {"kind", "version"}
-                    or type(ready["version"]) is not int
-                    or ready["version"] != 1
-                ):
-                    raise CloudHandshakeDeniedError("handshake denied")
-                receipt = HandshakeReceipt(device_id=device_id, session_id=session_id)
-                if dispatcher_factory is None:
-                    # Proof-only mode retains its original no-command behavior.
-                    return receipt
-                # The caller, not Cloud wire claims, supplies this independent
-                # local authorization and owner-approved project selection.
-                dispatcher = dispatcher_factory(receipt)
-                if not isinstance(dispatcher, LocalReadDispatch):
-                    raise CloudHandshakeDeniedError("handshake denied")
-                try:
-                    dispatcher.assert_transport_session(device_id=device_id, session_id=session_id)
-                    raw_request = await socket.recv()
-                    if not isinstance(raw_request, str):
-                        raise CloudHandshakeDeniedError("handshake denied")
-                    envelope = _read_strict_json(raw_request, "connector.authorized_read")
-                    if (
-                        set(envelope) != {"kind", "version", "sequence", "request"}
-                        or type(envelope["version"]) is not int
-                        or envelope["version"] != 1
-                        or type(envelope["sequence"]) is not int
-                        or not isinstance(envelope["request"], dict)
-                    ):
-                        raise CloudHandshakeDeniedError("handshake denied")
-                    request_bytes = json.dumps(
-                        envelope["request"], separators=(",", ":"), ensure_ascii=False
-                    ).encode("utf-8")
-                    # read() fences replay, local path, expiry, and real-time
-                    # authorization; no native KiCad operation is exposed.
-                    response = await asyncio.to_thread(
-                        dispatcher.read, request_bytes, sequence=envelope["sequence"]
-                    )
-                    dispatcher.assert_transport_session(device_id=device_id, session_id=session_id)
-                    await socket.send(
-                        json.dumps(
-                            {
-                                "kind": "connector.read_result",
-                                "version": 1,
-                                "sequence": envelope["sequence"],
-                                "result": response,
-                            },
-                            separators=(",", ":"),
-                        )
-                    )
-                    raw_ack = await socket.recv()
-                    if not isinstance(raw_ack, str):
-                        raise CloudHandshakeDeniedError("handshake denied")
-                    ack = _read_strict_json(raw_ack, "connector.read_ack")
-                    if (
-                        set(ack) != {"kind", "version", "sequence", "requestId"}
-                        or type(ack["version"]) is not int
-                        or ack["version"] != 1
-                        or type(ack["sequence"]) is not int
-                        or ack["sequence"] != envelope["sequence"]
-                        or ack["requestId"] != response["requestId"]
-                    ):
-                        raise CloudHandshakeDeniedError("handshake denied")
-                    return receipt
-                finally:
-                    dispatcher.close()
-    except (OSError, ValueError, TimeoutError, WebSocketException) as exc:
-        raise CloudHandshakeDeniedError("handshake denied") from exc
+            )
+            challenge = await socket.recv()
+            if not isinstance(challenge, str):
+                raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+            proof = sign_device_challenge(
+                challenge.encode(),
+                expected_device_id=device_id,
+                now_unix_ms=now_ms(),
+                signing_key=signing_key,
+            )
+            await socket.send(json.dumps(proof, separators=(",", ":")))
+            session = await socket.recv()
+            if not isinstance(session, str):
+                raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+            signed = sign_session_challenge(
+                session.encode(),
+                expected_device_id=device_id,
+                now_unix_ms=now_ms(),
+                signing_key=signing_key,
+            )
+            accepted_session = _read_strict_json(session, "connector.session_challenge")
+            session_id = accepted_session["sessionId"]
+            if not isinstance(session_id, str):
+                raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+            await socket.send(json.dumps(signed, separators=(",", ":")))
+            raw_ready = await socket.recv()
+            if not isinstance(raw_ready, str):
+                raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+            ready = _read_strict_json(raw_ready, "connector.ready")
+            if (
+                set(ready) != {"kind", "version"}
+                or type(ready["version"]) is not int
+                or ready["version"] != 1
+            ):
+                raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
+            receipt = HandshakeReceipt(device_id=device_id, session_id=session_id)
+            return await _complete_authorized_read(socket, receipt, dispatcher_factory)
+    except (OSError, ValueError, WebSocketException) as exc:
+        raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED) from exc
 
 
 async def establish_proof_only_handshake(
@@ -285,7 +300,7 @@ async def execute_single_approved_read(
     authorize and deliver one read over this wire protocol before activation.
     """
     if not callable(dispatcher_factory):
-        raise CloudHandshakeDeniedError("handshake denied")
+        raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
     return await _perform_outbound_session(
         origin=origin,
         trusted_origin=trusted_origin,

@@ -18,6 +18,8 @@ from kicad_mcp.cloud_readonly_boundary import (
     inspect_readonly,
 )
 
+_READ_DENIED = "request denied"
+
 MAX_READS_PER_SESSION = 32
 
 
@@ -41,7 +43,7 @@ class LocalReadDispatch:
         self._verified = verified
         self._project = operator_project
         if not callable(current_authorization):
-            raise LocalReadDeniedError("request denied")
+            raise LocalReadDeniedError(_READ_DENIED)
         # Never derive this predicate from a Cloud message or local wire claim.
         # It must query the independently trusted, current grant/session state.
         self._current_authorization = current_authorization
@@ -56,9 +58,9 @@ class LocalReadDispatch:
         try:
             authorized = self._current_authorization()
         except Exception as exc:
-            raise LocalReadDeniedError("request denied") from exc
+            raise LocalReadDeniedError(_READ_DENIED) from exc
         if authorized is not True:
-            raise LocalReadDeniedError("request denied")
+            raise LocalReadDeniedError(_READ_DENIED)
 
     def assert_transport_session(self, *, device_id: str, session_id: str) -> None:
         """Fence an externally authenticated socket to this local dispatcher."""
@@ -70,7 +72,7 @@ class LocalReadDispatch:
                 or self._project.device_id != device_id
                 or self._project.project_id != self._verified.project_id
             ):
-                raise LocalReadDeniedError("request denied")
+                raise LocalReadDeniedError(_READ_DENIED)
 
     def close(self) -> None:
         """Invalidate this session, including any pending read response."""
@@ -92,7 +94,7 @@ class LocalReadDispatch:
                 or sequence != self._last_sequence + 1
                 or sequence > MAX_READS_PER_SESSION
             ):
-                raise LocalReadDeniedError("request denied")
+                raise LocalReadDeniedError(_READ_DENIED)
             self._busy = True
             # Consumed before inspection, including any failed authorization.
             self._last_sequence = sequence
@@ -102,10 +104,10 @@ class LocalReadDispatch:
             initial = _validate_frame(frame, self._verified, self._project, self._clock_ms())
             request_id = initial["requestId"]
             if not isinstance(request_id, str):
-                raise LocalReadDeniedError("request denied")
+                raise LocalReadDeniedError(_READ_DENIED)
             with self._lock:
                 if self._closed or request_id in self._seen_request_ids:
-                    raise LocalReadDeniedError("request denied")
+                    raise LocalReadDeniedError(_READ_DENIED)
                 self._seen_request_ids.add(request_id)
 
             response = inspect_readonly(
@@ -118,13 +120,13 @@ class LocalReadDispatch:
             # file metadata inspection was blocked or time advanced.
             body = _validate_frame(frame, self._verified, self._project, self._clock_ms())
             if body["requestId"] != response["requestId"]:
-                raise LocalReadDeniedError("request denied")
+                raise LocalReadDeniedError(_READ_DENIED)
             # An owner/client/device/project grant may be revoked while the
             # OS metadata inspection runs. Never return a result after cutoff.
             self._authorize_now()
             with self._lock:
                 if self._closed:
-                    raise LocalReadDeniedError("request denied")
+                    raise LocalReadDeniedError(_READ_DENIED)
                 return response
         finally:
             with self._lock:

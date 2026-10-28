@@ -21,7 +21,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
 from kicad_mcp.cloud_outbound_handshake import (
-    CloudHandshakeDeniedError,
     HandshakeReceipt,
     execute_single_approved_read,
 )
@@ -37,6 +36,8 @@ class LocalApprovalDeniedError(ValueError):
     """Fail closed, without returning private-key or filesystem details."""
 
 
+_LOCAL_APPROVAL_DENIED = "local approval denied"
+
 _OWNER_KEY_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
@@ -51,7 +52,7 @@ def _open_owner_private_dir(filename: Path) -> int:
         or _OWNER_KEY_FILENAME.fullmatch(filename.name) is None
         or any(part in {".", ".."} for part in filename.parts[1:])
     ):
-        raise LocalApprovalDeniedError("local approval denied")
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
     directory_fd: int | None = None
     try:
         directory_fd = _open_operator_directory(filename.parent)
@@ -61,12 +62,12 @@ def _open_owner_private_dir(filename: Path) -> int:
             or metadata.st_uid != getuid()
             or metadata.st_mode & 0o077
         ):
-            raise LocalApprovalDeniedError("local approval denied")
+            raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
         return directory_fd
     except (OSError, ValueError) as exc:
         if directory_fd is not None:
             os.close(directory_fd)
-        raise LocalApprovalDeniedError("local approval denied") from exc
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED) from exc
 
 
 def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
@@ -74,7 +75,7 @@ def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
     nofollow = getattr(os, "O_NOFOLLOW", None)
     getuid = getattr(os, "getuid", None)
     if os.name != "posix" or not isinstance(nofollow, int) or not callable(getuid):
-        raise LocalApprovalDeniedError("local approval denied")
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
     directory_fd = _open_owner_private_dir(filename)
     descriptor: int | None = None
     try:
@@ -90,13 +91,13 @@ def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
             or metadata.st_mode & 0o077
             or not 1 <= metadata.st_size <= 8192
         ):
-            raise LocalApprovalDeniedError("local approval denied")
+            raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
         key = load_pem_private_key(os.read(descriptor, 8193), password=None)
         if not isinstance(key, Ed25519PrivateKey):
-            raise LocalApprovalDeniedError("local approval denied")
+            raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
         return key
     except (OSError, ValueError, TypeError) as exc:
-        raise LocalApprovalDeniedError("local approval denied") from exc
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED) from exc
     finally:
         if descriptor is not None:
             os.close(descriptor)
@@ -127,7 +128,7 @@ def _parser() -> argparse.ArgumentParser:
 
 async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
     if not options.allow_once or not options.project_directory.is_absolute():
-        raise LocalApprovalDeniedError("local approval denied")
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
     signing_key = _load_owner_key(options.private_key_file)
 
     def approved_local_project(receipt: HandshakeReceipt) -> LocalReadDispatch:
@@ -165,7 +166,7 @@ def main(argv: list[str] | None = None) -> int:
     options = _parser().parse_args(argv)
     try:
         asyncio.run(_connect(options))
-    except (CloudHandshakeDeniedError, LocalApprovalDeniedError, ValueError, OSError):
+    except (ValueError, OSError):
         print("Local Cloud connection denied", file=sys.stderr)
         return 1
     print("One authorized project-presence request completed")
