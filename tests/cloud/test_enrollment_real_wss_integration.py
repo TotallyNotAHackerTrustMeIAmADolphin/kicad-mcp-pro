@@ -150,8 +150,9 @@ async def _scenario(
             # A valid remote proof must not reset an expired local approval.
             approval_clock["monotonic_ns"] += 30_000_000_000
             await ws.send('{"kind":"connector.ready","version":1}')
+            pending_close = ws.recv()
             with pytest.raises(ConnectionClosed):
-                await asyncio.wait_for(ws.recv(), timeout=3)
+                await asyncio.wait_for(pending_close, timeout=3)
             observations.append("denied-before-summary")
             return
         await ws.send('{"kind":"connector.ready","version":1}')
