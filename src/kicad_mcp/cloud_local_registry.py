@@ -82,7 +82,13 @@ def resolve_registered_read(
 
     nofollow = getattr(os, "O_NOFOLLOW", None)
     nonblock = getattr(os, "O_NONBLOCK", None)
-    if os.name != "posix" or type(nofollow) is not int or type(nonblock) is not int:
+    getuid = getattr(os, "getuid", None)
+    if (
+        os.name != "posix"
+        or type(nofollow) is not int
+        or type(nonblock) is not int
+        or not callable(getuid)
+    ):
         raise LocalApprovalDeniedError(_DENIED)
 
     fd: int | None = None
@@ -100,7 +106,7 @@ def resolve_registered_read(
         if (
             not stat.S_ISREG(info.st_mode)
             or info.st_nlink != 1
-            or info.st_uid != os.getuid()
+            or info.st_uid != getuid()
             or info.st_mode & 0o077
             or not 1 <= info.st_size <= 2048
         ):
