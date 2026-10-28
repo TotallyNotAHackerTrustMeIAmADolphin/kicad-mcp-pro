@@ -1,6 +1,6 @@
 """Interactive, explicitly approved Cloud device enrollment (not access enablement).
 
-Initiate the Cloud v1 device challenge with a new or existing owner-only
+Initiate the Cloud v1 device challenge with a fresh owner-only
 Ed25519 key, wait for owner approval in a browser, and redeem once. No OAuth
 session cookies, bearer tokens, private keys, or local KiCad files are sent.
 """
@@ -203,6 +203,30 @@ def _challenge(result: dict[str, object], key: Ed25519PrivateKey) -> tuple[str, 
     return challenge, code, secret, fingerprint, expiry
 
 
+def _require_unused_binding_path(keyfile: Path) -> None:
+    """Fail before any Cloud request if a pairing record already occupies the path.
+
+    Exclusive creation during redeem is still authoritative if the filesystem
+    changes after this preflight check.
+    """
+    try:
+        directory_fd = _open_owner_private_dir(keyfile)
+        try:
+            try:
+                os.stat(
+                    keyfile.name + ".cloud-binding-v1.json",
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return
+            raise CloudPairingError(_PAIRING_DENIED)
+        finally:
+            os.close(directory_fd)
+    except (OSError, ValueError) as exc:
+        raise CloudPairingError(_PAIRING_DENIED) from exc
+
+
 def enroll(
     origin: str, alias: str, keyfile: Path, approval: Callable[[str, str, str], None]
 ) -> tuple[str, str]:
@@ -220,6 +244,7 @@ def enroll(
         except (OSError, ValueError) as exc:
             raise CloudPairingError(_PAIRING_DENIED) from exc
         raise CloudPairingError(_PAIRING_DENIED)
+    _require_unused_binding_path(keyfile)
     key = _load_or_create(keyfile)
     der = key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
     result = _post(

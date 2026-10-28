@@ -143,6 +143,32 @@ def test_enrollment_binding_is_strictly_create_only_even_if_identical(tmp_path: 
     assert binding.read_bytes() == before
 
 
+@pytest.mark.parametrize("existing_kind", ["regular", "symlink"])
+def test_pending_binding_collision_denied_before_device_creation_or_key_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, existing_kind: str
+) -> None:
+    """Do not provision a Cloud device when its future sidecar path is occupied."""
+    keyfile = tmp_path / "new-owner.pem"
+    binding = keyfile.with_name(keyfile.name + ".cloud-binding-v1.json")
+    if existing_kind == "regular":
+        binding.write_text("incomplete enrollment")
+    else:
+        binding.symlink_to(tmp_path / "nowhere")
+
+    def no_remote_request(*_args: object, **_kwargs: object) -> dict:
+        pytest.fail("a collision must be rejected before Cloud challenge or redeem")
+
+    monkeypatch.setattr(cloud_pair, "_post", no_remote_request)
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair.enroll("https://localhost", "Approved Fixture", keyfile, lambda *_: None)
+    assert not keyfile.exists()
+    assert (
+        binding.is_symlink()
+        if existing_kind == "symlink"
+        else binding.read_text() == "incomplete enrollment"
+    )
+
+
 def test_invalid_origin_never_creates_a_key(tmp_path: Path) -> None:
     for origin in [
         "http://localhost",
