@@ -45,7 +45,7 @@ def _gate(monkeypatch: pytest.MonkeyPatch, report: dict[str, Any] | None):
         lambda name: (Path(name), report, None if report is not None else "boom"),
     )
     # Zone-fill evidence is covered separately; keep these tests about the DRC JSON.
-    monkeypatch.setattr(validation, "_zone_fill_blockers", lambda _report: [], raising=False)
+    monkeypatch.setattr(validation, "_zone_fill_check", lambda _report: ([], []), raising=False)
     return validation._evaluate_pcb_gate()
 
 

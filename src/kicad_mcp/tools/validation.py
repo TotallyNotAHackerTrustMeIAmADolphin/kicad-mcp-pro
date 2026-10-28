@@ -6,7 +6,10 @@ import hashlib
 import json
 import math
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from html import escape
@@ -46,6 +49,7 @@ from ..validation.drc_report import (
     unconnected_nets,
 )
 from ..validation.policy_state import ValidationPolicyStateService
+from ..validation.zone_fill import drc_outcome_changes, scan_zone_fill
 from . import validation_policy_state
 from .export_support import _ensure_output_dir, _get_pcb_file, _get_sch_file, _run_cli_variants
 from .gates import GateOutcome, GateStatus, _combined_status
@@ -1628,6 +1632,98 @@ def _evaluate_pre_sync_gate() -> GateOutcome:
     )
 
 
+_ZONE_PROBE_SIBLINGS = ("fp-lib-table", "sym-lib-table")
+_MAX_UNFILLED_ZONE_LINES = 10
+
+
+def _refill_probe_report(pcb_file: Path) -> tuple[dict[str, object] | None, str | None]:
+    """Run DRC with a fresh zone refill on a throwaway copy of the board.
+
+    The refill happens in memory inside kicad-cli and the result is never saved
+    (``--save-board`` is deliberately not passed). Working on a copy keeps the project
+    directory untouched, including the sidecar files kicad-cli may create next to its input.
+    """
+    with tempfile.TemporaryDirectory(prefix="kicad-mcp-zone-probe-") as scratch:
+        work = Path(scratch)
+        try:
+            copy = work / pcb_file.name
+            shutil.copyfile(pcb_file, copy)
+            for sibling in (
+                pcb_file.with_suffix(".kicad_pro"),
+                pcb_file.with_suffix(".kicad_dru"),
+                *(pcb_file.parent / name for name in _ZONE_PROBE_SIBLINGS),
+            ):
+                if sibling.is_file():
+                    shutil.copyfile(sibling, work / sibling.name)
+        except OSError as exc:
+            return None, f"could not prepare a scratch copy of the board ({exc})"
+
+        out_file = work / "zone_probe_drc.json"
+        command = ["pcb", "drc", "--output", str(out_file), "--format", "json", "--severity-all"]
+        command += ["--refill-zones", str(copy)]
+        try:
+            code, _stdout, stderr = _run_cli_variants([command])
+        except (OSError, subprocess.SubprocessError) as exc:
+            return None, str(exc)
+        if not out_file.is_file():
+            detail = stderr.strip() or f"exit code {code}"
+            return None, f"kicad-cli produced no DRC report with --refill-zones ({detail})"
+        try:
+            parsed = json.loads(out_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return None, f"the refill DRC report could not be read ({exc})"
+        status, schema_error = drc_runner.classify_drc_report(parsed)
+        if status == "malformed":
+            return None, f"the refill DRC report is malformed ({schema_error})"
+        return cast(dict[str, object], parsed), None
+
+
+def _zone_fill_check(report: dict[str, object]) -> tuple[list[str], list[str]]:
+    """Check that copper-zone fill is present and current. Returns ``(blockers, info)``.
+
+    Read-only: the board file is only read, and staleness is judged by a refill on a scratch
+    copy (see ``_refill_probe_report``). Anything that cannot be established is a blocker.
+    """
+    hint = (
+        "Refill zones (pcb_refill_zones) and re-run this gate; the gate never modifies the board."
+    )
+    try:
+        pcb_file = _get_pcb_file()
+        board_text = pcb_file.read_text(encoding="utf-8")
+    except (ValueError, OSError, UnicodeError) as exc:
+        return [f"Zone fill could not be verified: the board file is unavailable ({exc})."], []
+
+    scan = scan_zone_fill(board_text)
+    if scan.copper_zones == 0:
+        return [], ["Zone fill: no copper zones"]
+    if scan.unfilled:
+        blockers = [
+            f"Copper zone fill is missing for {len(scan.unfilled)} of {scan.copper_zones} zone(s)."
+        ]
+        blockers += [f"Unfilled {zone}." for zone in scan.unfilled[:_MAX_UNFILLED_ZONE_LINES]]
+        if len(scan.unfilled) > _MAX_UNFILLED_ZONE_LINES:
+            blockers.append(
+                f"{len(scan.unfilled) - _MAX_UNFILLED_ZONE_LINES} more unfilled zone(s) not listed."
+            )
+        blockers.append(hint)
+        return blockers, []
+
+    refilled, error = _refill_probe_report(pcb_file)
+    if refilled is None:
+        return [f"Zone fill could not be verified as current: {error}."], []
+    changes = drc_outcome_changes(report, refilled)
+    if changes:
+        return [
+            "Stored zone fill is stale: a fresh refill changes the DRC result "
+            f"({'; '.join(changes)}).",
+            hint,
+        ], []
+    return [], [
+        f"Zone fill: {scan.copper_zones} copper zone(s) filled and current "
+        "(a fresh refill reproduces the stored DRC result)"
+    ]
+
+
 def _unconnected_net_details(unconnected: list[dict[str, object]]) -> list[str]:
     """Render one actionable ``FAIL:`` line per net that still has open connections."""
     by_net, unparsed = unconnected_nets(unconnected)
@@ -1673,18 +1769,25 @@ def _evaluate_pcb_gate() -> GateOutcome:
     details = [
         f"DRC violations: {len(violations)}",
         f"Unconnected items: {len(unconnected)}",
-        *_unconnected_net_details(unconnected),
         f"Courtyard issues: {len(courtyard)}",
     ]
     if violations:
         details.append(f"DRC types: {_type_breakdown(violations)}")
-    if evidence_problems:
-        status = "BLOCKED"
-        details.extend(f"BLOCKED: {problem}" for problem in evidence_problems)
+    zone_blockers, zone_info = _zone_fill_check(report)
+    blockers = [*evidence_problems, *zone_blockers]
+    # Blockers come before the (possibly long) per-net list so that consumers which only
+    # show the first few detail lines still see why the gate is BLOCKED.
+    details.extend(f"BLOCKED: {problem}" for problem in blockers)
+    details.extend(zone_info)
+    details.extend(_unconnected_net_details(unconnected))
+    if blockers:
         return GateOutcome(
             name="PCB",
-            status=status,
-            summary="PCB connectivity could not be verified from the DRC report.",
+            status="BLOCKED",
+            summary=(
+                "PCB connectivity or copper-zone fill could not be verified; "
+                "the DRC result is not sufficient evidence."
+            ),
             details=details,
         )
     return GateOutcome(
