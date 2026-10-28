@@ -96,6 +96,33 @@ production authority or session credential. Source and test code never
 contact Cloud, start KiCad, mutate an owner's design, send keys over the
 network or require a production account.
 
+## Loopback-only TLS/WebSocket interoperability fixture
+
+`tests/cloud/test_isolated_tls_websocket_handshake.py` exercises the
+existing Cloud v1 **wire sequence**, not just signature construction:
+`device.hello` → `device.challenge` → signed `device.proof`
+→ `connector.session_challenge` → signed `connector.session_proof`
+→ `connector.ready`. It starts a **localhost-only** fake Cloud server,
+issues a temporary synthetic TLS certificate for `localhost`, verifies
+that certificate and DNS hostname through Python's `ssl` trust checks,
+and uses independent server-side Ed25519 verification of both proof bytes.
+No real Cloud user or device identity is ever issued or enrolled.
+
+Negative cases require TLS rejection before *any* device handshake for a
+wrong certificate or hostname; challenge state/cross-device mismatches
+also prevent proof release. The test-only client will not connect to a
+non-loopback host, a plain `ws://` endpoint, a changed WS path, or a
+credential-bearing/query URL. `websockets` is an explicit **development
+dependency**, not a deployed local connector or background service.
+
+The synthetic TLS private key lives only in the pytest temporary directory
+and is unrelated to any production credential; tests clean it up. This
+fixture does not provide actual production server trust configuration,
+a deployed outbound transport, OAuth login, device enrollment, revocation
+against a live PostgreSQL database, or Cloud-to-KiCad read dispatch.
+**Do not treat a successful fake-server handshake as permission to
+enable production pairing or WebSocket flags.**
+
 ## Gates before any live connection
 
 1. Complete a separate owner-controlled enrollment and actual OAuth
