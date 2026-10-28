@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosed
 
 from kicad_mcp.cloud_outbound_handshake import (
     CloudHandshakeDeniedError,
+    _endpoint,
     establish_proof_only_handshake,
     execute_single_approved_read,
 )
@@ -272,6 +273,22 @@ def test_refuse_untrusted_or_malformed_origin_before_network(origin: str) -> Non
     )
     with pytest.raises(CloudHandshakeDeniedError):
         asyncio.run(_raise_argument_1)
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://localhost:443?",
+        "https://localhost:443#",
+        "https://localhost:443/?",
+        "https://localhost:443/#",
+    ],
+)
+def test_empty_query_or_fragment_delimiters_never_change_ws_path(origin: str) -> None:
+    # urlsplit() reports an empty query/fragment; string concatenation then
+    # misroutes /api/v1/connector/ws into a query or fragment on the wire.
+    with pytest.raises(CloudHandshakeDeniedError):
+        _endpoint(origin=origin, trusted_origin=origin)
 
 
 def test_no_trust_verification_optout_even_for_localhost() -> None:

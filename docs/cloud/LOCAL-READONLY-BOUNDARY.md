@@ -125,7 +125,12 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   network or production access.
 - Ed25519 device/session signatures use domain-separated Cloud v1 bytes.
   The local client checks hostname and CA before signing; compressed
-  WebSocket frames and alternate origins/paths are rejected. Pairing
+  WebSocket frames and alternate origins/paths are rejected. Both the HTTPS
+  pairing client and signed WSS connector reject origins with an empty
+  query/fragment delimiter (`?` or `#`) before use; otherwise the appended
+  WebSocket endpoint path would become a query or fragment. Enrollment also
+  rejects DNS names ending in a dot, which the WSS connector forbids. These
+  mismatches were reproduced as failing tests before correction. Pairing
   requests use verified HTTPS, bounded response size, **no redirects or
   automatic retries**. Owner keys use exclusive creation and mode 0600.
 - Only `project_summary` is accepted. Native KiCad execution, DRC/ERC,

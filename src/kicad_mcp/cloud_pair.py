@@ -51,6 +51,10 @@ class CloudPairingError(ValueError):
 
 def _origin(value: str) -> tuple[str, int, str]:
     try:
+        # urlsplit() loses empty query/fragment delimiters, so reject them
+        # on the original input before storing an origin for future WSS use.
+        if not isinstance(value, str) or "?" in value or "#" in value:
+            raise CloudPairingError(_PAIRING_DENIED)
         parsed = urlsplit(value)
         if (
             parsed.scheme != "https"

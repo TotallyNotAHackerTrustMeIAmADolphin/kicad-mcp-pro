@@ -50,7 +50,13 @@ class HandshakeReceipt:
 
 def _endpoint(*, origin: str, trusted_origin: str) -> str:
     """Require exact independently configured HTTPS Cloud origin."""
-    if not isinstance(origin, str) or not isinstance(trusted_origin, str):
+    if (
+        not isinstance(origin, str)
+        or not isinstance(trusted_origin, str)
+        # Parsed empty delimiters are invisible to .query/.fragment, but
+        # concatenating the WSS path would put it in the wrong URL section.
+        or any(delimiter in value for value in (origin, trusted_origin) for delimiter in "?#")
+    ):
         raise CloudHandshakeDeniedError(_HANDSHAKE_DENIED)
     parsed = urlsplit(origin)
     expected = urlsplit(trusted_origin)
