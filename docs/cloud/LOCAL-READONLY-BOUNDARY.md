@@ -32,6 +32,10 @@ component-by-component `openat(O_NOFOLLOW | O_DIRECTORY)` for the folder,
 and `stat(..., follow_symlinks=False)` relative to the opened descriptor.
 It returns booleans, opaque UUIDs, and an **offline preview kind** — never
 project names, file bytes, directory paths, or manufacturing outputs.
+This first version requires POSIX directory-descriptor no-follow semantics:
+**Windows is explicitly rejected**, rather than silently using weaker path
+traversal. Windows support requires a separately reviewed Windows-native
+handle/reparse-point implementation and security tests.
 
 Only `project_summary` is accepted; `run_drc`, `run_erc`, all remote writes,
 native execution and export are denied. If even one security precondition

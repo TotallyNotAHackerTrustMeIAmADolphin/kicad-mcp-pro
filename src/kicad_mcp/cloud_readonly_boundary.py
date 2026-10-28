@@ -110,7 +110,13 @@ def _validate_frame(
 
 def _open_operator_directory(folder: Path) -> int:
     """Open each directory hop without following symlinks (no TOCTOU walk)."""
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    # Windows has no equivalent stdlib openat/O_NOFOLLOW directory walk.
+    # Do not silently downgrade to a symlink-following path check.
+    dir_flag = getattr(os, "O_DIRECTORY", None)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", None)
+    if os.name != "posix" or type(dir_flag) is not int or type(nofollow_flag) is not int:
+        raise LocalReadDeniedError("request denied")
+    flags = os.O_RDONLY | dir_flag | nofollow_flag
     descriptor = os.open("/", flags)
     try:
         for component in folder.parts[1:]:

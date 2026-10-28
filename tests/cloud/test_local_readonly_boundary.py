@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,11 @@ from kicad_mcp.cloud_readonly_boundary import (
     OperatorProject,
     VerifiedLocalBinding,
     inspect_readonly,
+)
+
+pytestmark = pytest.mark.skipif(
+    os.name != "posix",
+    reason="Secure no-follow directory traversal currently supported on POSIX only",
 )
 
 DEVICE = "11111111-1111-4111-8111-111111111111"
