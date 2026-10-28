@@ -67,9 +67,12 @@ def test_terminal_consent_rejects_noninteractive_or_declined_requests(
 ) -> None:
     options = argparse.Namespace(
         cloud_origin="https://cloud.example",
+        owner_sub="owner-fixture",
+        device_id=DEVICE,
         project_id=PROJECT,
         project_directory=tmp_path,
         filename_stem="demo",
+        private_key_file=tmp_path / "owner.pem",
     )
     monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: False)
@@ -116,9 +119,12 @@ def test_terminal_consent_requires_fresh_explicit_challenge(
 ) -> None:
     options = argparse.Namespace(
         cloud_origin="https://cloud.example",
+        owner_sub="owner-fixture",
+        device_id=DEVICE,
         project_id=PROJECT,
         project_directory=tmp_path,
         filename_stem="demo",
+        private_key_file=tmp_path / "owner.pem",
     )
     monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
@@ -133,6 +139,9 @@ def test_terminal_consent_requires_fresh_explicit_challenge(
     displayed_lines = terminal.splitlines()
     assert f"Cloud origin: {options.cloud_origin!r}" in displayed_lines
     assert f"Project UUID: {options.project_id!r}" in displayed_lines
+    assert f"Owner account: {options.owner_sub!r}" in displayed_lines
+    assert f"Device UUID: {options.device_id!r}" in displayed_lines
+    assert f"Owner key file: {str(options.private_key_file)!r}" in displayed_lines
 
 
 def test_terminal_consent_declined_cannot_access_private_key_or_network(

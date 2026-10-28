@@ -143,9 +143,12 @@ def _confirm_local_read(options: argparse.Namespace) -> None:
     challenge = secrets.token_hex(4).upper()
     print("One-time metadata-only KiCad Cloud read (no project contents).")
     print(f"Cloud origin: {options.cloud_origin!r}")
+    print(f"Owner account: {options.owner_sub!r}")
+    print(f"Device UUID: {options.device_id!r}")
     print(f"Project UUID: {options.project_id!r}")
     print(f"Local directory: {str(options.project_directory)!r}")
     print(f"Local project stem: {options.filename_stem!r}")
+    print(f"Owner key file: {str(options.private_key_file)!r}")
     answer = input(f"Type APPROVE {challenge} to authorize exactly one read: ")
     if answer != f"APPROVE {challenge}":
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
