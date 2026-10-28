@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
-import http.client
 import json
 import os
 import re
@@ -22,6 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import urllib3
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
@@ -70,35 +70,46 @@ def _post(
     data = json.dumps(body, separators=(",", ":")).encode("utf-8")
     if len(data) > 1024:
         raise CloudPairingError("pairing denied")
-    connection = http.client.HTTPSConnection(
-        origin[0], origin[1], timeout=10, context=ssl.create_default_context()
+    # urllib3 is a direct runtime dependency. A dedicated pool is never shared
+    # with untrusted origins; TLS hostname/CA verification is mandatory.
+    pool = urllib3.HTTPSConnectionPool(
+        origin[0],
+        origin[1],
+        timeout=urllib3.Timeout(connect=10, read=10),
+        retries=False,
+        cert_reqs="CERT_REQUIRED",
+        ssl_context=ssl.create_default_context(),
     )
     try:
-        connection.request(
+        # Do not follow redirects or retry a pairing request: either could
+        # move a one-use proof to a different endpoint or duplicate an attempt.
+        response = pool.request(
             "POST",
             path,
             body=data,
-            headers={
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            retries=False,
+            redirect=False,
+            preload_content=False,
         )
-        response = connection.getresponse()
-        payload = response.read(2049)
-        if (
-            response.status != status
-            or len(payload) > 2048
-            or response.getheader("Content-Type", "").split(";")[0] != "application/json"
-        ):
-            raise CloudPairingError("pairing denied")
-        decoded = json.loads(payload)
-        if not isinstance(decoded, dict):
-            raise CloudPairingError("pairing denied")
-        return decoded
-    except (OSError, ValueError, http.client.HTTPException, UnicodeError) as exc:
+        try:
+            payload = response.read(2049)
+            if (
+                response.status != status
+                or len(payload) > 2048
+                or response.headers.get("Content-Type", "").split(";")[0] != "application/json"
+            ):
+                raise CloudPairingError("pairing denied")
+            decoded = json.loads(payload)
+            if not isinstance(decoded, dict):
+                raise CloudPairingError("pairing denied")
+            return decoded
+        finally:
+            response.release_conn()
+    except (urllib3.exceptions.HTTPError, OSError, ValueError, UnicodeError) as exc:
         raise CloudPairingError("pairing denied") from exc
     finally:
-        connection.close()
+        pool.close()
 
 
 def _create_private_key(path: Path) -> Ed25519PrivateKey:

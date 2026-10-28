@@ -138,29 +138,32 @@ def test_declined_or_tampered_challenge_never_redeems(
 
 
 def test_redirect_does_not_approve_or_follow(monkeypatch: pytest.MonkeyPatch) -> None:
+    visited: list[str] = []
+
     class Response:
         status = 302
+        headers = {"Content-Type": "text/html"}
 
         def read(self, _: int) -> bytes:
             return b"redirect"
 
-        def getheader(self, key: str, default: str = "") -> str:
-            return "text/html"
+        def release_conn(self) -> None:
+            visited.append("released")
 
-    class Connection:
+    class Pool:
         def __init__(self, *_: object, **__: object) -> None:
             pass
 
-        def request(self, *_: object, **__: object) -> None:
-            pass
-
-        def getresponse(self) -> Response:
+        def request(self, *_: object, **kwargs: object) -> Response:
+            assert kwargs["redirect"] is False
+            assert kwargs["retries"] is False
+            assert kwargs["preload_content"] is False
             return Response()
 
         def close(self) -> None:
-            pass
+            visited.append("closed")
 
-    monkeypatch.setattr(cloud_pair.http.client, "HTTPSConnection", Connection)
+    monkeypatch.setattr(cloud_pair.urllib3, "HTTPSConnectionPool", Pool)
     with pytest.raises(cloud_pair.CloudPairingError):
         cloud_pair._post(
             ("localhost", 443, "https://localhost"),
@@ -168,6 +171,7 @@ def test_redirect_does_not_approve_or_follow(monkeypatch: pytest.MonkeyPatch) ->
             {"alias": "Fixture"},
             201,
         )
+    assert visited == ["released", "closed"]
 
 
 def test_https_pairing_post_sends_only_expected_json_and_refuses_oversize(
@@ -177,44 +181,53 @@ def test_https_pairing_post_sends_only_expected_json_and_refuses_oversize(
 
     class Response:
         status = 201
+        headers = {"Content-Type": "application/json; charset=utf-8"}
 
         def read(self, maximum: int) -> bytes:
             assert maximum == 2049
             return b'{"challengeId":"test"}'
 
-        def getheader(self, key: str, default: str = "") -> str:
-            assert key == "Content-Type"
-            return "application/json; charset=utf-8"
+        def release_conn(self) -> None:
+            responses.append(("released", ""))
 
-    class Connection:
+    class Pool:
         def __init__(self, host: str, port: int, **options: object) -> None:
             assert (host, port) == ("localhost", 443)
-            assert options["timeout"] == 10
-            assert "context" in options
+            assert isinstance(options["timeout"], cloud_pair.urllib3.Timeout)
+            assert options["retries"] is False
+            assert options["cert_reqs"] == "CERT_REQUIRED"
+            assert "ssl_context" in options
 
-        def request(self, method: str, path: str, **options: object) -> None:
+        def request(self, method: str, path: str, **options: object) -> Response:
             assert method == "POST" and path == "/api/v1/pairing/device/challenge"
             body = options["body"]
             assert isinstance(body, bytes)
             assert b"secret" not in body
-            headers = options["headers"]
-            assert headers == {"Content-Type": "application/json", "Accept": "application/json"}
+            assert options["headers"] == {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            }
+            assert options["redirect"] is False
+            assert options["preload_content"] is False
+            assert options["retries"] is False
             responses.append((method, path))
-
-        def getresponse(self) -> Response:
             return Response()
 
         def close(self) -> None:
             responses.append(("closed", ""))
 
-    monkeypatch.setattr(cloud_pair.http.client, "HTTPSConnection", Connection)
+    monkeypatch.setattr(cloud_pair.urllib3, "HTTPSConnectionPool", Pool)
     assert cloud_pair._post(
         ("localhost", 443, "https://localhost"),
         "/api/v1/pairing/device/challenge",
         {"alias": "Demo"},
         201,
     ) == {"challengeId": "test"}
-    assert responses == [("POST", "/api/v1/pairing/device/challenge"), ("closed", "")]
+    assert responses == [
+        ("POST", "/api/v1/pairing/device/challenge"),
+        ("released", ""),
+        ("closed", ""),
+    ]
     with pytest.raises(cloud_pair.CloudPairingError):
         cloud_pair._post(
             ("localhost", 443, "https://localhost"),
