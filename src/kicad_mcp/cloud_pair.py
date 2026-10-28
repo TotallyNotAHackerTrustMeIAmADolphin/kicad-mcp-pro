@@ -29,7 +29,12 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-from kicad_mcp.cloud_once import _load_owner_key, _open_owner_private_dir
+from kicad_mcp.cloud_once import (
+    _load_owner_key,
+    _open_owner_private_dir,
+    _read_owner_binding,
+    _save_owner_binding,
+)
 
 _PAIRING_DENIED = "pairing denied"
 _JSON_MEDIA_TYPE = "application/json"
@@ -204,6 +209,17 @@ def enroll(
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}", alias):
         raise CloudPairingError(_PAIRING_DENIED)
     target = _origin(origin)
+    # A previously enrolled key is bound to its original Cloud; switching
+    # origin requires separate owner enrollment with a new device key.
+    if keyfile.is_file():
+        # Reusing an already enrolled private key would create another remote
+        # device record with the same signing identity. Require a fresh key
+        # and a separate owner browser approval for each new enrollment.
+        try:
+            _read_owner_binding(keyfile)
+        except (OSError, ValueError) as exc:
+            raise CloudPairingError(_PAIRING_DENIED) from exc
+        raise CloudPairingError(_PAIRING_DENIED)
     key = _load_or_create(keyfile)
     der = key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
     result = _post(
@@ -241,6 +257,12 @@ def enroll(
         or answer["enabled"] is not False
     ):
         raise CloudPairingError(_PAIRING_DENIED)
+    try:
+        _save_owner_binding(
+            keyfile, origin=target[2], device_id=answer["deviceId"], fingerprint=fingerprint
+        )
+    except (OSError, ValueError) as exc:
+        raise CloudPairingError(_PAIRING_DENIED) from exc
     return answer["deviceId"], fingerprint
 
 

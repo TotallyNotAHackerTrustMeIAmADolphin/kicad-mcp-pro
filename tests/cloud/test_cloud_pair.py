@@ -76,11 +76,50 @@ def test_pairing_exact_payload_and_owner_review(
     assert seen == ["challenge", "browser_approved", "redeem"]
     assert len(fingerprint) == 64
     assert keyfile.stat().st_mode & 0o777 == 0o600
-    # Re-running must reuse the owner key, never overwrite it.
+    # A successfully redeemed, browser-approved device must pin its origin
+    # and device identity in an owner-only sidecar before any later CLI use.
+    binding = keyfile.with_name(keyfile.name + ".cloud-binding-v1.json")
+    assert binding.is_file()
+    assert binding.stat().st_mode & 0o777 == 0o600
+    assert '"origin":"https://localhost"' in binding.read_text()
+    assert f'"deviceId":"{DEVICE}"' in binding.read_text()
+    # A second enrollment with the same signing key would create another
+    # remote device; reject it before sending a new Cloud challenge.
     before = keyfile.read_bytes()
     seen.clear()
-    assert cloud_pair.enroll("https://localhost", "Approved Fixture", keyfile, approve)[0] == DEVICE
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair.enroll("https://localhost", "Approved Fixture", keyfile, approve)
+    assert seen == []
     assert before == keyfile.read_bytes()
+
+
+def test_existing_device_pin_cannot_be_overwritten_or_repaired_by_reenrollment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keyfile = tmp_path / "owner.pem"
+    cloud_pair._create_private_key(keyfile)
+    der = (
+        _load_owner_key(keyfile)
+        .public_key()
+        .public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    )
+    fingerprint = hashlib.sha256(der).hexdigest()
+    cloud_pair._save_owner_binding(
+        keyfile, origin="https://localhost", device_id=DEVICE, fingerprint=fingerprint
+    )
+    binding = keyfile.with_name(keyfile.name + ".cloud-binding-v1.json")
+    before = binding.read_bytes()
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair.enroll("https://attacker.example", "Fixture", keyfile, lambda *_: None)
+    assert binding.read_bytes() == before
+
+    def impossible(*_: object, **__: object) -> dict:
+        pytest.fail("existing enrollment pin must be checked before Cloud HTTP")
+
+    monkeypatch.setattr(cloud_pair, "_post", impossible)
+    binding.unlink()
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair.enroll("https://localhost", "Fixture", keyfile, lambda *_: None)
 
 
 def test_invalid_origin_never_creates_a_key(tmp_path: Path) -> None:

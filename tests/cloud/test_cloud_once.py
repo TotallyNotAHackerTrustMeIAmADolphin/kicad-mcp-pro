@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import time
@@ -11,7 +12,12 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.asymmetric.rsa import generate_private_key
-from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    NoEncryption,
+    PrivateFormat,
+    PublicFormat,
+)
 
 from kicad_mcp import cloud_once
 from kicad_mcp.cloud_outbound_handshake import CloudHandshakeDeniedError, HandshakeReceipt
@@ -32,6 +38,16 @@ def _keyfile(path: Path, *, other: bool = False) -> Path:
     )
     path.write_bytes(key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
     path.chmod(0o600)
+    if not other:
+        from kicad_mcp.cloud_pair import _save_owner_binding
+
+        der = key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+        _save_owner_binding(
+            path,
+            origin="https://cloud.example",
+            device_id=DEVICE,
+            fingerprint=hashlib.sha256(der).hexdigest(),
+        )
     return path
 
 
@@ -79,6 +95,90 @@ def test_terminal_consent_rejects_noninteractive_or_declined_requests(
     monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("no prompt for piped commands"))
     with pytest.raises(cloud_once.LocalApprovalDeniedError):
         cloud_once._confirm_local_read(options)
+
+
+def test_unbound_owner_key_denied_before_private_key_or_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    keyfile = _keyfile(tmp_path / "unbound.pem")
+    keyfile.with_name(keyfile.name + ".cloud-binding-v1.json").unlink()
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_: "APPROVE CAFEBABE")
+    monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
+    monkeypatch.setattr(
+        cloud_once,
+        "execute_single_approved_read",
+        lambda **_: pytest.fail("unpaired key must never connect"),
+    )
+    assert cloud_once.main(_args(tmp_path, keyfile)) == 1
+    assert "denied" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("override", "value"),
+    [
+        ("--cloud-origin", "https://wrong.example"),
+        ("--device-id", "55555555-5555-4555-8555-555555555555"),
+    ],
+)
+def test_enrollment_pin_denies_another_cloud_or_device_before_key_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    override: str,
+    value: str,
+) -> None:
+    keyfile = _keyfile(tmp_path / "enrolled.pem")
+    args = _args(tmp_path, keyfile)
+    args[args.index(override) + 1] = value
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_: "APPROVE CAFEBABE")
+    monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
+    monkeypatch.setattr(cloud_once, "_load_owner_key", lambda *_: pytest.fail("do not open key"))
+    monkeypatch.setattr(
+        cloud_once,
+        "execute_single_approved_read",
+        lambda **_: pytest.fail("never connect to a substituted origin/device"),
+    )
+    assert cloud_once.main(args) == 1
+    assert "denied" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("kind", ["symlink", "world-readable", "duplicate-json", "mismatch"])
+def test_enrollment_pin_rejects_tamper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    kind: str,
+) -> None:
+    keyfile = _keyfile(tmp_path / "enrolled.pem")
+    binding = keyfile.with_name(keyfile.name + ".cloud-binding-v1.json")
+    if kind == "symlink":
+        copy = tmp_path / "copy.json"
+        copy.write_bytes(binding.read_bytes())
+        binding.unlink()
+        binding.symlink_to(copy)
+    elif kind == "world-readable":
+        binding.chmod(0o644)
+    elif kind == "duplicate-json":
+        binding.write_text('{"origin":"https://cloud.example","origin":"https://other.example"}')
+    else:
+        value = json.loads(binding.read_text())
+        value["fingerprint"] = "0" * 64
+        binding.write_text(json.dumps(value))
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_: "APPROVE CAFEBABE")
+    monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
+    monkeypatch.setattr(
+        cloud_once,
+        "execute_single_approved_read",
+        lambda **_: pytest.fail("invalid enrollment pin must not connect"),
+    )
+    assert cloud_once.main(_args(tmp_path, keyfile)) == 1
+    assert "denied" in capsys.readouterr().err
 
 
 def test_piped_cli_denied_before_private_key_or_network(

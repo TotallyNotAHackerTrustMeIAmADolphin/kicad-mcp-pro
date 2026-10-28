@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
+import json
 import os
 import re
 import secrets
@@ -19,7 +21,11 @@ import time
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
+    load_pem_private_key,
+)
 
 from kicad_mcp.cloud_outbound_handshake import (
     HandshakeReceipt,
@@ -40,6 +46,7 @@ class LocalApprovalDeniedError(ValueError):
 _LOCAL_APPROVAL_DENIED = "local approval denied"
 
 _OWNER_KEY_FILENAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_BINDING_SUFFIX = ".cloud-binding-v1.json"
 
 
 def _open_owner_private_dir(filename: Path) -> int:
@@ -105,6 +112,113 @@ def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
         os.close(directory_fd)
 
 
+def _read_owner_binding(filename: Path) -> dict[str, str]:
+    """Read owner-only pairing metadata by a pinned no-follow directory FD."""
+    directory_fd = _open_owner_private_dir(filename)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            filename.name + _BINDING_SUFFIX,
+            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=directory_fd,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077
+            or not 1 <= metadata.st_size <= 512
+        ):
+            raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
+        raw = os.read(descriptor, 513)
+
+        def unique(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            if len({k for k, _ in pairs}) != len(pairs):
+                raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
+            return dict(pairs)
+
+        value = json.loads(raw, object_pairs_hook=unique)
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"origin", "deviceId", "fingerprint"}
+            or not all(isinstance(v, str) for v in value.values())
+            or len(value["origin"]) > 256
+            or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                value["deviceId"],
+            )
+            is None
+            or re.fullmatch(r"[0-9a-f]{64}", value["fingerprint"]) is None
+        ):
+            raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
+        return value
+    except (OSError, ValueError, UnicodeError, TypeError) as exc:
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory_fd)
+
+
+def _save_owner_binding(filename: Path, *, origin: str, device_id: str, fingerprint: str) -> None:
+    """Pin approved enrollment to one HTTPS origin and device, never overwrite."""
+    # The fields are independently validated by the Cloud enrollment response.
+    expected = {"origin": origin, "deviceId": device_id, "fingerprint": fingerprint}
+    if (
+        not isinstance(origin, str)
+        or not origin.startswith("https://")
+        or len(origin) > 256
+        or re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", device_id
+        )
+        is None
+        or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
+    ):
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
+    directory_fd = _open_owner_private_dir(filename)
+    descriptor: int | None = None
+    created = False
+    try:
+        try:
+            descriptor = os.open(
+                filename.name + _BINDING_SUFFIX,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=directory_fd,
+            )
+        except FileExistsError:
+            if _read_owner_binding(filename) != expected:
+                raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED) from None
+            return
+        created = True
+        body = json.dumps(expected, separators=(",", ":"), sort_keys=True).encode()
+        with os.fdopen(descriptor, "wb") as output:
+            descriptor = None
+            output.write(body)
+            output.flush()
+            os.fsync(output.fileno())
+    except (OSError, ValueError, TypeError) as exc:
+        if created:
+            os.unlink(filename.name + _BINDING_SUFFIX, dir_fd=directory_fd)
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(directory_fd)
+
+
+def _load_bound_owner_key(filename: Path, origin: str, device_id: str) -> Ed25519PrivateKey:
+    """Reject a different Cloud or device before using an enrolled owner key."""
+    record = _read_owner_binding(filename)
+    if record["origin"] != origin or record["deviceId"] != device_id:
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
+    key = _load_owner_key(filename)
+    der = key.public_key().public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    if hashlib.sha256(der).hexdigest() != record["fingerprint"]:
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
+    return key
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="One approved KiCad Cloud metadata read")
     parser.add_argument("--cloud-origin", required=True, help="Trusted HTTPS origin chosen locally")
@@ -157,7 +271,9 @@ def _confirm_local_read(options: argparse.Namespace) -> None:
 async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
     if not options.allow_once or not options.project_directory.is_absolute():
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
-    signing_key = _load_owner_key(options.private_key_file)
+    signing_key = _load_bound_owner_key(
+        options.private_key_file, options.cloud_origin, options.device_id
+    )
 
     def approved_local_project(receipt: HandshakeReceipt) -> LocalReadDispatch:
         # This is an independent, local, time-limited operator grant, never a
