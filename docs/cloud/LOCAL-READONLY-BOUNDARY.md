@@ -215,6 +215,11 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   PR-head CI, coverage, security and supported-platform gates. Do not
   dismiss alerts to bypass a failing gate.
 
+For the independent owner-authentication trust model, privileged-agent
+preconditions and negative acceptance cases, see
+[Owner consent boundary acceptance](OWNER-CONSENT-BOUNDARY-ACCEPTANCE.md).
+This is a design, not a completed owner-authentication implementation.
+
 **Release blockers:** verified real-owner login/consent and device enrollment
 in a privately approved isolated environment, review of trusted TLS ingress
 and device-source rules, revocation during an actual local read, both PRs'
