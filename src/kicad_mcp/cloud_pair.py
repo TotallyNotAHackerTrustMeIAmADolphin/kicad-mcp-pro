@@ -318,7 +318,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--cloud-origin", required=True)
     parser.add_argument("--alias", required=True)
-    parser.add_argument("--private-key-file", type=Path, required=True)
+    # A fresh random local key slot replaces arbitrary CLI-selected paths.
+    # The Cloud device UUID is bound to this slot's owner-only sidecar on
+    # successful enrollment; a separate offline project record references it.
     parser.add_argument("--begin-pairing", action="store_true", required=True)
     options = parser.parse_args(argv)
     try:
@@ -326,9 +328,21 @@ def main(argv: list[str] | None = None) -> int:
         # or initiating a one-use pairing challenge on the Cloud.
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise CloudPairingError(_PAIRING_DENIED)
-        device_id, fingerprint = enroll(
-            options.cloud_origin, options.alias, options.private_key_file, _approval
-        )
+        from uuid import uuid4
+
+        from kicad_mcp.cloud_local_registry import default_registry_root
+
+        root = default_registry_root()
+        keys = root / "keys"
+        root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        keys.mkdir(mode=0o700, exist_ok=True)
+        slot = str(uuid4())
+        keyfile = keys / (slot + ".pem")
+        # Before an HTTP request or key creation, prove the preselected local
+        # storage is owned by this POSIX user and has private permissions.
+        owned_fd = _open_owner_private_dir(keyfile)
+        os.close(owned_fd)
+        device_id, fingerprint = enroll(options.cloud_origin, options.alias, keyfile, _approval)
     except (CloudPairingError, KeyboardInterrupt, EOFError):
         print(
             "Cloud pairing not completed; no access enabled. An owner-only key file may exist.",
@@ -336,6 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     print(f"Device registered: {device_id}; fingerprint: {fingerprint}; Cloud enabled: false")
+    print(f"Local key slot: {slot} (store offline in owner-private project registry)")
     print("No remote access granted. Keep the private key for a future authorized connection.")
     return 0
 

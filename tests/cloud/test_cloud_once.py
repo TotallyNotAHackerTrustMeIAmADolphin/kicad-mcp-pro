@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives.serialization import (
     PublicFormat,
 )
 
-from kicad_mcp import cloud_once
+from kicad_mcp import cloud_local_registry, cloud_once
 from kicad_mcp.cloud_outbound_handshake import CloudHandshakeDeniedError, HandshakeReceipt
 from kicad_mcp.cloud_readonly_boundary import LocalReadDeniedError
 
@@ -57,7 +57,25 @@ def _keyfile(path: Path, *, other: bool = False) -> Path:
     return path
 
 
+_CURRENT_LOCAL_FIXTURE: tuple[Path, Path] | None = None
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_registered_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unit tests of legacy auth/deadline logic use a test-only resolver.
+    # The real registry permissions, tamper and identity checks are exercised
+    # separately by test_cloud_local_registry.py.
+    def fixture_resolve(**_kwargs: object) -> cloud_local_registry.LocalRegisteredRead:
+        assert _CURRENT_LOCAL_FIXTURE is not None
+        folder, key = _CURRENT_LOCAL_FIXTURE
+        return cloud_local_registry.LocalRegisteredRead(key, folder, "demo")
+
+    monkeypatch.setattr(cloud_local_registry, "resolve_registered_read", fixture_resolve)
+
+
 def _args(folder: Path, key: Path) -> list[str]:
+    global _CURRENT_LOCAL_FIXTURE
+    _CURRENT_LOCAL_FIXTURE = (folder, key)
     return [
         "--cloud-origin",
         "https://cloud.example",
@@ -67,12 +85,6 @@ def _args(folder: Path, key: Path) -> list[str]:
         DEVICE,
         "--project-id",
         PROJECT,
-        "--project-directory",
-        str(folder),
-        "--filename-stem",
-        "demo",
-        "--private-key-file",
-        str(key),
         "--allow-once",
     ]
 
@@ -116,6 +128,10 @@ def test_same_uid_pty_is_not_independent_human_approval(tmp_path: Path) -> None:
         "import sys\n"
         "from kicad_mcp import cloud_once\n"
         "args = cloud_once._parser().parse_args(sys.argv[1:])\n"
+        "from pathlib import Path\n"
+        "args.project_directory = Path.cwd()\n"
+        "args.private_key_file = Path.cwd() / 'synthetic.pem'\n"
+        "args.filename_stem = 'demo'\n"
         "cloud_once._confirm_local_read(args)\n"
         "print('SYNTHETIC_PTY_CONSENT_PASSED', flush=True)\n"
     )
@@ -490,6 +506,9 @@ def test_grant_clock_starts_when_local_foreground_consent_is_returned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     options = cloud_once._parser().parse_args(_args(tmp_path, tmp_path / "not-opened.pem"))
+    options.project_directory = tmp_path
+    options.private_key_file = tmp_path / "not-opened.pem"
+    options.filename_stem = "demo"
     clocks = {"wall_ns": 1_800_000_000_000_000_000, "monotonic_ns": 100_000_000_000}
     monkeypatch.setattr(cloud_once.time, "time_ns", lambda: clocks["wall_ns"])
     monkeypatch.setattr(cloud_once.time, "monotonic_ns", lambda: clocks["monotonic_ns"])
@@ -515,6 +534,9 @@ def test_slow_handshake_cannot_renew_the_original_local_lease(
     folder.mkdir()
     keyfile = _keyfile(tmp_path / "owner.pem")
     options = cloud_once._parser().parse_args(_args(folder, keyfile))
+    options.project_directory = folder
+    options.private_key_file = keyfile
+    options.filename_stem = "demo"
     clocks = {"monotonic": 100_000_000_000}
     monkeypatch.setattr(cloud_once.time, "monotonic_ns", lambda: clocks["monotonic"])
     original_window = (1_800_000_030_000, clocks["monotonic"] + 30_000_000_000)

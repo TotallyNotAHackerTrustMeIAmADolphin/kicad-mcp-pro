@@ -244,13 +244,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--owner-sub", required=True, help="Enrolled account subject")
     parser.add_argument("--device-id", required=True, help="Already enrolled device UUID")
     parser.add_argument("--project-id", required=True, help="Explicitly allowed project UUID")
-    parser.add_argument(
-        "--project-directory", type=Path, required=True, help="Approved absolute folder"
-    )
-    parser.add_argument("--filename-stem", required=True, help="Approved direct-child project stem")
-    parser.add_argument(
-        "--private-key-file", type=Path, required=True, help="Owner-only Ed25519 PEM"
-    )
+    # No LLM/CLI-supplied filesystem paths. The already-registered device
+    # and project UUIDs select fixed local owner-private records instead.
     parser.add_argument(
         "--allow-once",
         action="store_true",
@@ -341,6 +336,17 @@ async def _connect(
 def main(argv: list[str] | None = None) -> int:
     options = _parser().parse_args(argv)
     try:
+        from kicad_mcp.cloud_local_registry import resolve_registered_read
+
+        selected = resolve_registered_read(
+            owner_sub=options.owner_sub,
+            origin=options.cloud_origin,
+            device_id=options.device_id,
+            project_id=options.project_id,
+        )
+        options.project_directory = selected.project_directory
+        options.filename_stem = selected.filename_stem
+        options.private_key_file = selected.key_file
         approval_window = _confirm_local_read(options)
         asyncio.run(_connect(options, approval_window))
     except (ValueError, OSError, EOFError, KeyboardInterrupt):

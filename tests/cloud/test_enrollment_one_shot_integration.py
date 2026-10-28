@@ -135,6 +135,15 @@ def test_browser_paired_identity_completes_only_one_local_project_summary(
     monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
     monkeypatch.setattr("builtins.input", lambda *_: "APPROVE CAFEBABE")
+    from kicad_mcp import cloud_local_registry
+
+    monkeypatch.setattr(
+        cloud_local_registry,
+        "resolve_registered_read",
+        lambda **_: cloud_local_registry.LocalRegisteredRead(
+            private_key_path, selected_project, "board"
+        ),
+    )
     options = [
         "--cloud-origin",
         ORIGIN,
@@ -144,12 +153,6 @@ def test_browser_paired_identity_completes_only_one_local_project_summary(
         DEVICE,
         "--project-id",
         PROJECT,
-        "--project-directory",
-        str(selected_project),
-        "--filename-stem",
-        "board",
-        "--private-key-file",
-        str(private_key_path),
         "--allow-once",
     ]
     assert cloud_once.main(options) == 0

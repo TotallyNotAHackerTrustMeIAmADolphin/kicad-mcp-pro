@@ -289,6 +289,13 @@ async def _scenario(
         monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
         monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
         monkeypatch.setattr("builtins.input", lambda *_: "APPROVE CAFEBABE")
+        from kicad_mcp import cloud_local_registry
+
+        monkeypatch.setattr(
+            cloud_local_registry,
+            "resolve_registered_read",
+            lambda **_: cloud_local_registry.LocalRegisteredRead(keyfile, project_dir, "demo"),
+        )
         args = [
             "--cloud-origin",
             origin,
@@ -298,12 +305,6 @@ async def _scenario(
             DEVICE,
             "--project-id",
             PROJECT,
-            "--project-directory",
-            str(project_dir),
-            "--filename-stem",
-            "demo",
-            "--private-key-file",
-            str(keyfile),
             "--allow-once",
         ]
         exit_status = await asyncio.to_thread(cloud_once.main, args)

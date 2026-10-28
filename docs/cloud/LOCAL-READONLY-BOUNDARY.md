@@ -54,7 +54,7 @@ On a POSIX workstation with this checkout and `uv`:
 # Private key stays on this workstation. Do not commit, upload or echo it.
 umask 077
 KEY_DIR="$HOME/.local/share/kicad-mcp-cloud"
-install -d -m 0700 "$KEY_DIR"
+install -d -m 0700 "$KEY_DIR" "$KEY_DIR/keys" "$KEY_DIR/projects"
 
 # Set the independently verified HTTPS origin of the ISOLATED Cloud.
 CLOUD_ORIGIN="https://cloud-test.example.invalid"
@@ -62,7 +62,6 @@ CLOUD_ORIGIN="https://cloud-test.example.invalid"
 uv run --all-extras python -m kicad_mcp.cloud_pair \
   --cloud-origin "$CLOUD_ORIGIN" \
   --alias "My test workstation" \
-  --private-key-file "$KEY_DIR/device-ed25519.pem" \
   --begin-pairing
 ```
 
@@ -74,9 +73,11 @@ requires both stdin and stdout to be connected to a foreground terminal;
 redirected or piped invocation is rejected **before** a key is created
 or a Cloud pairing challenge is requested. A PTY owned by an agent
 running as the same OS user is not independent human approval.
-Save the printed `deviceId`
-as an opaque non-secret ID; keep the private-key file private. Do not
-interpret enrollment as device activation.
+Save the printed `deviceId` and `Local key slot` UUID as non-secret
+identifiers. A fresh owner-only key is created at the fixed application path
+`~/.local/share/kicad-mcp-cloud/keys/<keySlot>.pem`; neither the LLM nor
+the pairing command can choose a filesystem pathname. Never disclose the key
+contents. Do not interpret enrollment as device activation.
 
 In the Cloud browser `/devices`, explicitly enable the newly enrolled
 device and register one read-only test project. Note its `projectId` and
@@ -84,9 +85,36 @@ your displayed `ownerSub`. Separately consent to an authorized AI client
 with `projects:read` and explicitly grant *that client* `readonly` access
 to *that project*. No Cloud action selects a local directory.
 
-When a properly OAuth-authenticated client is ready to request this exact
-project, start a single local one-shot session with the **local project
-folder/stem chosen by the owner**:
+For this DRAFT, **there is no automatic, agent-trusted profile issuer**:
+before any read, the human operator must independently provision a local
+private record at the fixed path
+`~/.local/share/kicad-mcp-cloud/projects/<projectId>.json`
+(mode `0600`, under a mode `0700`, owner-owned `projects` directory).
+Its **exact seven string keys** are `ownerSub`, `cloudOrigin`, `deviceId`,
+`projectId`, `keySlot`, `directory` and `filenameStem`.
+For example, with *synthetic placeholders* rather than credentials:
+
+```json
+{
+  "ownerSub": "owner-from-cloud",
+  "cloudOrigin": "https://cloud-test.example.invalid",
+  "deviceId": "11111111-1111-4111-8111-111111111111",
+  "projectId": "22222222-2222-4222-8222-222222222222",
+  "keySlot": "33333333-3333-4333-8333-333333333333",
+  "directory": "/absolute/path/to/owner-selected/test-project",
+  "filenameStem": "test-project"
+}
+```
+
+The owner must manually replace the placeholders and protect the record;
+the project directory must exist, be absolute and contain no symlink
+ancestors. A missing, malformed, group-accessible, linked or
+cross-owner/device/project/origin record denies the read. This manual
+record is **not** independent human authorization: a same-UID or sudo-capable
+agent can still modify it. Do not enable production with this DRAFT.
+
+The one-shot read CLI now accepts **identifiers only**, never the project
+directory, filename stem or PEM path:
 
 ```sh
 uv run --all-extras python -m kicad_mcp.cloud_once \
@@ -94,11 +122,14 @@ uv run --all-extras python -m kicad_mcp.cloud_once \
   --owner-sub "<ownerSub from Cloud /devices>" \
   --device-id "<deviceId from successful pairing>" \
   --project-id "<projectId registered in Cloud>" \
-  --project-directory "/absolute/path/to/owner-selected/test-project" \
-  --filename-stem "test-project" \
-  --private-key-file "$KEY_DIR/device-ed25519.pem" \
   --allow-once
 ```
+
+There is no legacy CLI path fallback. Old path arguments fail at parsing.
+The command reads the owner-private project record, selects its validated
+`keySlot` under the fixed private key directory, and continues only if the
+existing owner-binding fingerprint, origin, device, session and consent
+checks pass. An AI-supplied project UUID is never sufficient by itself.
 
 The separately authorized AI client must call
 `POST /api/v1/connector/project-summary` with its valid OAuth Bearer token,

@@ -39,8 +39,6 @@ def test_pairing_cli_rejects_redirected_terminal_before_enrollment(
             "https://localhost",
             "--alias",
             "Approved Fixture",
-            "--private-key-file",
-            str(keyfile),
             "--begin-pairing",
         ]
     )
@@ -640,8 +638,6 @@ def test_cli_requires_explicit_consent_and_reports_disabled_device(
         "https://localhost",
         "--alias",
         "Fixture",
-        "--private-key-file",
-        str(tmp_path / "owner.pem"),
     ]
     with pytest.raises(SystemExit) as missing_consent:
         cloud_pair.main(options)
@@ -653,6 +649,9 @@ def test_cli_requires_explicit_consent_and_reports_disabled_device(
         received.extend([origin, alias, keyfile])
         return DEVICE, "e" * 64
 
+    from kicad_mcp import cloud_local_registry
+
+    monkeypatch.setattr(cloud_local_registry, "default_registry_root", lambda: tmp_path / "profile")
     monkeypatch.setattr(cloud_pair, "enroll", authorized)
     monkeypatch.setattr(cloud_pair.sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(cloud_pair.sys.stdout, "isatty", lambda: True)
@@ -661,7 +660,12 @@ def test_cli_requires_explicit_consent_and_reports_disabled_device(
     assert DEVICE in output
     assert "enabled: false" in output
 
-    assert received == ["https://localhost", "Fixture", tmp_path / "owner.pem"]
+    assert received[:2] == ["https://localhost", "Fixture"]
+    assert len(received) == 3
+    assert isinstance(received[2], Path)
+    assert received[2].parent == tmp_path / "profile" / "keys"
+    assert received[2].suffix == ".pem"
+    assert "Local key slot:" in output
 
     def rejected(*_: object) -> tuple[str, str]:
         raise cloud_pair.CloudPairingError("pairing denied")
