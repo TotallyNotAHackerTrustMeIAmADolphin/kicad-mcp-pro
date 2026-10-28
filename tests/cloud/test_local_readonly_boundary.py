@@ -167,6 +167,30 @@ def test_symlinked_parent_component_denied(approved, tmp_path) -> None:
         invoke(_raise_argument_7, (approved[0], changed))
 
 
+def test_project_presence_rejects_hardlinked_files_outside_approved_directory(
+    approved: tuple[VerifiedLocalBinding, OperatorProject], tmp_path: Path
+) -> None:
+    """A regular inode aliased into the project is not an approved direct child.
+
+    Cloud must not report the presence of a hard-linked file from another
+    directory, even though os.stat(..., follow_symlinks=False) accepts it.
+    """
+    folder = approved[1].directory
+    board = folder / "Example.kicad_pcb"
+    board.unlink()
+    outside = tmp_path / "unapproved-source.kicad_pcb"
+    outside.write_text("different owner's layout", encoding="utf-8")
+    os.link(outside, board)
+    with pytest.raises(LocalReadDeniedError):
+        invoke(packet(), approved)
+    board.unlink()
+    assert invoke(packet(), approved)["files"] == {
+        "projectPresent": True,
+        "boardPresent": False,
+        "schematicPresent": True,
+    }
+
+
 def test_project_presence_read_resists_directory_swap_after_fd_pin(
     approved, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

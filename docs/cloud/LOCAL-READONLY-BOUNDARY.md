@@ -115,9 +115,13 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
 
 - All local file checks are on the **owner-selected direct child** of an
   absolute folder, using POSIX descriptor-relative no-follow metadata
-  access. Symlinks and unsupported Windows-native handle semantics **fail
-  closed**; Windows support requires its own independently reviewed
-  handle/reparse-point implementation.
+  access. Symlinks, multiply hard-linked KiCad project files and unsupported
+  Windows-native handle semantics **fail closed**; Windows support requires
+  its own independently reviewed handle/reparse-point implementation.
+  The metadata-only scan rejects project files with `st_nlink != 1`, so a
+  regular file linked from outside the owner-selected folder cannot masquerade
+  as an approved project child. This does not defend against same-UID/root
+  access, malicious mounting, or missing independent owner authentication.
 - Owner PEM and pairing sidecar reads use pinned no-follow descriptor
   access with nonblocking opens: substituting a FIFO for either
   basename cannot hang the CLI before the regular-file/owner/mode

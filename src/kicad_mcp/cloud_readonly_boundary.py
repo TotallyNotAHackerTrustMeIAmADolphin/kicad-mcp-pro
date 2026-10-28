@@ -187,7 +187,10 @@ def _read_presence_only(policy: OperatorProject) -> dict[str, bool]:
                 result[label] = False
                 continue
             entry = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-            if not stat.S_ISREG(entry.st_mode):
+            # A hard link can alias an unrelated regular file into the
+            # approved folder without traversing a symlink. Presence for
+            # multiply-linked inodes must not count as this project's file.
+            if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
                 raise LocalReadDeniedError(_READ_DENIED)
             result[label] = True
         return result
