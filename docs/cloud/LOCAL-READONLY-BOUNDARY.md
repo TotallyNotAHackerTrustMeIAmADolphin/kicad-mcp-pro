@@ -69,7 +69,12 @@ uv run --all-extras python -m kicad_mcp.cloud_pair \
 In a browser **signed in as the intended owner of that isolated Cloud**,
 open the exact `/devices/pairing` URL printed by the client and approve
 its challenge UUID with the displayed short code. Return to the terminal
-and press Enter before the challenge expires. Save the printed `deviceId`
+and press Enter before the challenge expires. The pairing command
+requires both stdin and stdout to be connected to a foreground terminal;
+redirected or piped invocation is rejected **before** a key is created
+or a Cloud pairing challenge is requested. A PTY owned by an agent
+running as the same OS user is not independent human approval.
+Save the printed `deviceId`
 as an opaque non-secret ID; keep the private-key file private. Do not
 interpret enrollment as device activation.
 

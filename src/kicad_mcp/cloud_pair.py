@@ -292,6 +292,8 @@ def enroll(
 
 
 def _approval(page: str, challenge: str, code: str) -> None:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise CloudPairingError(_PAIRING_DENIED)
     print(f"Open {page} in your signed-in browser; approve challenge {challenge} with code {code}.")
     input("After approving in the browser, press Enter to redeem (Ctrl-C cancels): ")
 
@@ -306,6 +308,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--begin-pairing", action="store_true", required=True)
     options = parser.parse_args(argv)
     try:
+        # Refuse unattended shell pipes before creating the signing key
+        # or initiating a one-use pairing challenge on the Cloud.
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise CloudPairingError(_PAIRING_DENIED)
         device_id, fingerprint = enroll(
             options.cloud_origin, options.alias, options.private_key_file, _approval
         )

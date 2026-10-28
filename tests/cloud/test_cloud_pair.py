@@ -21,6 +21,60 @@ DEVICE = "22222222-2222-4222-8222-222222222222"
 SECRET = base64.urlsafe_b64encode(bytes(range(32))).decode().rstrip("=")
 
 
+@pytest.mark.parametrize("pipe", ["stdin", "stdout"])
+def test_pairing_cli_rejects_redirected_terminal_before_enrollment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pipe: str
+) -> None:
+    keyfile = tmp_path / "new-owner.pem"
+    monkeypatch.setattr(cloud_pair.sys.stdin, "isatty", lambda: pipe != "stdin")
+    monkeypatch.setattr(cloud_pair.sys.stdout, "isatty", lambda: pipe != "stdout")
+
+    def unexpected_enrollment(*_args: object) -> tuple[str, str]:
+        pytest.fail("redirected terminal must fail before any enrollment operation")
+
+    monkeypatch.setattr(cloud_pair, "enroll", unexpected_enrollment)
+    outcome = cloud_pair.main(
+        [
+            "--cloud-origin",
+            "https://localhost",
+            "--alias",
+            "Approved Fixture",
+            "--private-key-file",
+            str(keyfile),
+            "--begin-pairing",
+        ]
+    )
+    assert outcome == 1
+    assert not keyfile.exists()
+
+
+@pytest.mark.parametrize("pipe", ["stdin", "stdout"])
+def test_pairing_browser_confirmation_rejects_redirected_terminal(
+    monkeypatch: pytest.MonkeyPatch, pipe: str
+) -> None:
+    monkeypatch.setattr(cloud_pair.sys.stdin, "isatty", lambda: pipe != "stdin")
+    monkeypatch.setattr(cloud_pair.sys.stdout, "isatty", lambda: pipe != "stdout")
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair._approval("https://localhost/devices/pairing", CHALLENGE, "ABCDEF-123456")
+
+
+def test_pairing_browser_confirmation_permits_foreground_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cloud_pair.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_pair.sys.stdout, "isatty", lambda: True)
+    observed: list[str] = []
+
+    def acknowledge(prompt: str) -> str:
+        observed.append(prompt)
+        return ""
+
+    monkeypatch.setattr("builtins.input", acknowledge)
+    cloud_pair._approval("https://localhost/devices/pairing", CHALLENGE, "ABCDEF-123456")
+    assert len(observed) == 1
+    assert "browser" in observed[0]
+
+
 def test_pairing_exact_payload_and_owner_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -552,6 +606,8 @@ def test_cli_requires_explicit_consent_and_reports_disabled_device(
         return DEVICE, "e" * 64
 
     monkeypatch.setattr(cloud_pair, "enroll", authorized)
+    monkeypatch.setattr(cloud_pair.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_pair.sys.stdout, "isatty", lambda: True)
     assert cloud_pair.main([*options, "--begin-pairing"]) == 0
     output = capsys.readouterr().out
     assert DEVICE in output
