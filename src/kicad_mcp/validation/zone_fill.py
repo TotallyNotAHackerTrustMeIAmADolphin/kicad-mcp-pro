@@ -17,7 +17,7 @@ from .drc_report import Report, report_entries
 _ZONE_START = re.compile(r"\(zone(?=[\s)])")
 _TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|[()]')
 _NAME = re.compile(r'\((?:net_name|net)\s+"((?:\\.|[^"\\])*)"\)')
-_LAYERS = re.compile(r"\((?:layers|layer)((?:\s+\"(?:\\.|[^\"\\])*\")+)\s*\)")
+_LAYERS = re.compile(r"\((?:layers|layer)((?:\s+\"(?:\\.|[^\"\\])*+\")++)\s*\)")
 _LAYER_NAME = re.compile(r'"((?:\\.|[^"\\])*)"')
 _FILL_ENABLED = re.compile(r"\(fill\s+yes[\s)]")
 
