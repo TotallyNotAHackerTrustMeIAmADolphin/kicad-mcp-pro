@@ -8,6 +8,7 @@ Only an independently authenticated future transport may call these helpers.
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import re
 from typing import Literal
@@ -47,7 +48,7 @@ def _canonical_32(value: object) -> bool:
         return False
     try:
         decoded = base64.urlsafe_b64decode(value + "=")
-    except (ValueError, base64.binascii.Error):
+    except (ValueError, binascii.Error):
         return False
     return len(decoded) == 32 and base64.urlsafe_b64encode(decoded).decode().rstrip("=") == value
 
