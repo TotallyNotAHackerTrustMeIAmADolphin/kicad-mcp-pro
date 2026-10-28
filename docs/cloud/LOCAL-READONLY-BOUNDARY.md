@@ -1,225 +1,143 @@
-# Local KiCad Cloud connector — offline read-only boundary (candidate)
+# KiCad Cloud — owner-controlled local project summary (pre-production)
 
-**Status: not connected and not deployed.** This is an isolated, import-only
-policy module (`src/kicad_mcp/cloud_readonly_boundary.py`) plus an
-offline-only Ed25519 proof module (`src/kicad_mcp/cloud_device_proofs.py`)
-for a *future* local-device connector. It is not registered in the MCP server, GUI, plugin,
-background service, pairing flow, Cloud WebSocket or the native KiCad engine.
+**Status: implementation in two DRAFT pull requests, not deployed.** The local
+client is [KiCad MCP Pro PR #1513](https://github.com/oaslananka/kicad-mcp-pro/pull/1513)
+and the compatible Cloud pairing, browser authorization and read relay is
+[KiCad Cloud PR #64](https://github.com/oaslananka/kicad-mcp-pro-cloud/pull/64).
+Neither PR is a live production connection. The existing Cloud deployment
+reports `remoteConnector=not_implemented`; `PAIRING_DEVICE_API_ENABLED` and
+`CONNECTOR_WS_ENABLED` remain OFF. Do not merge or enable these features
+without an independent security and owner acceptance.
 
-## Where it fits
+## What works in an approved isolated environment
 
-The Cloud repository's reviewed v1 transport envelope defines
-`connector.read_request` with `requestId`, `deviceId`, `projectId`,
-`operation`, and `deadlineUnixMs`. Its Cloud WebSocket route currently
-authenticates device and session bootstrap only; **after `connector.ready`
-the Cloud does not yet dispatch any read requests or native operations**.
-Production `PAIRING_DEVICE_API_ENABLED` and `CONNECTOR_WS_ENABLED` both remain
-**false**. This local PR changes neither setting.
+The local operator can explicitly invoke two commands:
 
-A later *separately reviewed, authenticated* device transport will mint
-`VerifiedLocalBinding` using the locally authenticated device identity and
-a current owner/client/project authorization grant. **Never construct it
-directly from JSON or owner/device claims supplied by Cloud messages**.
-The owner separately configures `OperatorProject` on their workstation:
-opaque project UUID, device UUID, absolute project directory and a filename
-stem. The Cloud cannot choose or receive a local filesystem path.
+- `python -m kicad_mcp.cloud_pair --begin-pairing` creates or safely reuses an
+  owner-only Ed25519 key. It initiates a device challenge over verified HTTPS,
+  displays the short user code and challenge UUID, and **waits for an actual
+  signed-in owner to approve it in the Cloud browser**. Only after this
+  confirmation does it sign the one-use device proof and redeem the challenge.
+  The resulting device is **enrolled but disabled**. No private-key bytes are
+  uploaded. The local key directory must exist, be owned by the same POSIX
+  user, have no symlink substitution and forbid group/other access.
+- `python -m kicad_mcp.cloud_once --allow-once` opens an authenticated
+  HTTPS/WSS session with an already enrolled and explicitly enabled device
+  and independently chosen local KiCad project. It permits **one** owner-approved
+  `project_summary` presence-only read, with a 30-second local lease; it
+  closes the session on completion or denial. It does not start automatically
+  or require the existing local KiCad MCP service to be restarted.
 
-`inspect_readonly()` accepts one **strict 1 KiB v1 frame**, authenticates
-nothing itself, rechecks both identity IDs and the operation against the
-trusted binding and operator policy, requires a valid opaque session UUID
-and a trusted lease expiring within at most five minutes, rejects expired
-leases and read deadlines beyond that lease or 30 seconds, and checks only the existence of exactly three direct files:
-`*.kicad_pro`, `*.kicad_pcb` and `*.kicad_sch`. It follows no symlinks, uses
-component-by-component `openat(O_NOFOLLOW | O_DIRECTORY)` for the folder,
-and `stat(..., follow_symlinks=False)` relative to the opened descriptor.
-It returns booleans, opaque UUIDs, and an **offline preview kind** — never
-project names, file bytes, directory paths, or manufacturing outputs.
-This first version requires POSIX directory-descriptor no-follow semantics:
-**Windows is explicitly rejected**, rather than silently using weaker path
-traversal. Windows support requires a separately reviewed Windows-native
-handle/reparse-point implementation and security tests.
+The Cloud's actual OAuth JWT verifier and PostgreSQL gates require a
+`projects:read` client consent, an enabled unrevoked owner device, an enabled
+owner project and a separate per-client `readonly` project grant. The
+Cloud browser `/devices` page exposes device activation, metadata-only
+project registration (opaque UUID, alias, no local path), owner subject and
+the **explicit project-to-OAuth-client grant/revoke form**. The existing
+`/connections` page lists clients with OAuth consent and supports revoke.
+Browser mutations use same-origin, owner/session/action-specific signed CSRF;
+a revoked key cannot be reactivated and a revoked client needs **fresh**
+consent after its cutoff to receive another grant.
 
-Only `project_summary` is accepted; `run_drc`, `run_erc`, all remote writes,
-native execution and export are denied. If even one security precondition
-fails, the entire request fails closed.
+## Reproducible manual workflow (isolated test deployment only)
 
-## Offline device cryptography (not enrollment or Cloud authentication)
+The Cloud instance must be independently provisioned with **only the reviewed
+database migrations, built-in OAuth identity, valid HTTPS/WSS ingress and
+trusted device source**. Do not use production credentials, flags or shared
+proxy settings to make a test pass. The instructions below are for a
+separately approved, isolated Cloud test environment with these features
+already enabled; they will fail closed against current production.
 
-The Cloud's existing outbound WebSocket protocol asks for two domain-separated
-Ed25519 signatures during handshake:
-
-- `device.challenge` → `device.proof`: sign exactly
-  `kicad-cloud-device-handshake-v1\0{challengeId}\0{deviceId}\0{nonce}`.
-- `connector.session_challenge` → `connector.session_proof`: sign exactly
-  `kicad-cloud-bound-session-v1\0{sessionId}\0{challengeId}\0{deviceId}\0{nonce}\0{binding}`.
-
-The offline proof helpers check canonical UUIDs, base64url 32-byte nonces and
-connection binding, strict JSON field allowlists, device identity and a
-challenge expiry bounded by 60 seconds. They take a **caller-held, in-memory**
-`Ed25519PrivateKey` and emit only a Cloud v1 signature frame. The project
-now explicitly depends on `cryptography` for these helpers. Tests verify
-actual signatures using independent public-key verification and test that
-tampering with device/session/connection identity invalidates a signature;
-signing never writes or persists a private key.
-
-**This is not Cloud server authentication:** an attacker-controlled service
-could still submit a syntactically valid challenge. A future transport MUST
-verify the Cloud TLS host/certificate and endpoint identity *before* signing,
-maintain per-connection proof state to prevent cross-socket challenge reuse,
-handle key storage/revocation in an approved keystore, and independently verify
-owner OAuth authorization and active project/client grants. No transport,
-device enrollment, key persistence, background service or production use is
-implemented here.
-
-## Local review / fixture tests
-
-On a trusted development checkout, run:
+On a POSIX workstation with this checkout and `uv`:
 
 ```sh
-PYTHONPATH=src python3 -m pytest -q tests/cloud/
+# Private key stays on this workstation. Do not commit, upload or echo it.
+umask 077
+KEY_DIR="$HOME/.local/share/kicad-mcp-cloud"
+install -d -m 0700 "$KEY_DIR"
+
+# Set the independently verified HTTPS origin of the ISOLATED Cloud.
+CLOUD_ORIGIN="https://cloud-test.example.invalid"
+
+uv run --all-extras python -m kicad_mcp.cloud_pair \
+  --cloud-origin "$CLOUD_ORIGIN" \
+  --alias "My test workstation" \
+  --private-key-file "$KEY_DIR/device-ed25519.pem" \
+  --begin-pairing
 ```
 
-The tests include cryptographic Ed25519 challenge proof roundtrips with
-ephemeral keys, the checked-in KiCad 10 demo schematic and PCB, as well as
-malformed, duplicate-field, cross-device, cross-project, symlink, directory
-replacement, session lease/deadline, forbidden operation and content-leakage denials.
+In a browser **signed in as the intended owner of that isolated Cloud**,
+open the exact `/devices/pairing` URL printed by the client and approve
+its challenge UUID with the displayed short code. Return to the terminal
+and press Enter before the challenge expires. Save the printed `deviceId`
+as an opaque non-secret ID; keep the private-key file private. Do not
+interpret enrollment as device activation.
 
-`tests/cloud/test_isolated_authorization_lifecycle.py` additionally uses a
-**synthetic mutable grant/session state** to exercise current client/project
-permission intersection, revocation between requests, disconnect, duplicate
-sequence, wrong owner/client/device/session and a device lease that expires
-before a queued read. This is an **offline fixture**, not a cryptographic
-device authentication test, real OAuth verifier, live PostgreSQL-backed Cloud
-read gate, Cloud-to-local dispatcher or actual owner project grant. Fixture
-state deliberately models the Cloud side only; it cannot be used as a
-production authority or session credential. Source and test code never
-contact Cloud, start KiCad, mutate an owner's design, send keys over the
-network or require a production account.
+In the Cloud browser `/devices`, explicitly enable the newly enrolled
+device and register one read-only test project. Note its `projectId` and
+your displayed `ownerSub`. Separately consent to an authorized AI client
+with `projects:read` and explicitly grant *that client* `readonly` access
+to *that project*. No Cloud action selects a local directory.
 
-## Loopback-only TLS/WebSocket interoperability fixture
+When a properly OAuth-authenticated client is ready to request this exact
+project, start a single local one-shot session with the **local project
+folder/stem chosen by the owner**:
 
-`tests/cloud/test_isolated_tls_websocket_handshake.py` exercises the
-existing Cloud v1 **wire sequence**, not just signature construction:
-`device.hello` → `device.challenge` → signed `device.proof`
-→ `connector.session_challenge` → signed `connector.session_proof`
-→ `connector.ready`. It starts a **localhost-only** fake Cloud server,
-issues a temporary synthetic TLS certificate for `localhost`, verifies
-that certificate and DNS hostname through Python's `ssl` trust checks,
-and uses independent server-side Ed25519 verification of both proof bytes.
-No real Cloud user or device identity is ever issued or enrolled.
+```sh
+uv run --all-extras python -m kicad_mcp.cloud_once \
+  --cloud-origin "$CLOUD_ORIGIN" \
+  --owner-sub "<ownerSub from Cloud /devices>" \
+  --device-id "<deviceId from successful pairing>" \
+  --project-id "<projectId registered in Cloud>" \
+  --project-directory "/absolute/path/to/owner-selected/test-project" \
+  --filename-stem "test-project" \
+  --private-key-file "$KEY_DIR/device-ed25519.pem" \
+  --allow-once
+```
 
-Negative cases require TLS rejection before *any* device handshake for a
-wrong certificate or hostname; challenge state/cross-device mismatches
-also prevent proof release. The test-only client will not connect to a
-non-loopback host, a plain `ws://` endpoint, a changed WS path, or a
-credential-bearing/query URL. `websockets` is an explicit **development
-dependency**, not a deployed local connector or background service.
+The separately authorized AI client must call
+`POST /api/v1/connector/project-summary` with its valid OAuth Bearer token,
+`Content-Type: application/json`, and **only** `deviceId` and `projectId`
+as JSON fields while the one-shot session is active. The token must not
+be pasted in logs, shell history, PR comments or documentation. The Cloud
+server performs a fresh grant/session check before forwarding and a second
+grant/token check before delivering a response. Successful output contains
+only `projectPresent`, `boardPresent` and `schematicPresent` booleans;
+a local filename, project content and private key never become response
+fields. Failure is a generic denial; no remote fallback tool is offered.
 
-The synthetic TLS private key lives only in the pytest temporary directory
-and is unrelated to any production credential; tests clean it up. This
-fixture does not provide actual production server trust configuration,
-a deployed outbound transport, OAuth login, device enrollment, revocation
-against a live PostgreSQL database, or Cloud-to-KiCad read dispatch.
-**Do not treat a successful fake-server handshake as permission to
-enable production pairing or WebSocket flags.**
+## Security boundary and evidence
 
-## Session-bound, offline-only read dispatch and WebSocket fixture
+- All local file checks are on the **owner-selected direct child** of an
+  absolute folder, using POSIX descriptor-relative no-follow metadata
+  access. Symlinks and unsupported Windows-native handle semantics **fail
+  closed**; Windows support requires its own independently reviewed
+  handle/reparse-point implementation.
+- Ed25519 device/session signatures use domain-separated Cloud v1 bytes.
+  The local client checks hostname and CA before signing; compressed
+  WebSocket frames and alternate origins/paths are rejected. Pairing
+  requests use verified HTTPS, bounded response size, **no redirects or
+  automatic retries**. Owner keys use exclusive creation and mode 0600.
+- Only `project_summary` is accepted. Native KiCad execution, DRC/ERC,
+  PCB mutation, manufacturing/export, local path discovery and arbitrary
+  file reads are all denied. There is no background worker, persistent
+  online connection or unattended reconnect.
+- Real Cloud TypeScript handlers, PostgreSQL 17 migrations, JWT cryptographic
+  verifier and Python TLS/Ed25519 one-shot reader have passed a **combined
+  isolated cross-language acceptance** using synthetic owner/client/project
+  identities and an isolated KiCad file-presence fixture. Cloud owner
+  activation/grant/revocation tests have separately passed against a
+  disposable PostgreSQL 17 database. These tests do **not** establish
+  production owner OAuth login, approval of real project files or live
+  end-to-end device provisioning.
+- The local `tests/cloud/` suite is included in the full Python CI runner.
+  For proportionate local validation, run
+  `uv run --all-extras pytest -q tests/cloud/` and check the latest exact
+  PR-head CI, coverage, security and supported-platform gates. Do not
+  dismiss alerts to bypass a failing gate.
 
-The local-only `cloud_read_dispatch.py` provides a single-session
-`LocalReadDispatch` for **already independently authorized** local reads.
-It enforces one read at a time, strictly advancing sequence numbers,
-a maximum of 32 reads per session, **unique request IDs**, the existing
-approved device/project file-presence boundary and deadline re-validation
-**after** inspection. It consumes sequences even on denied inspections
-and permanently fences an in-flight result if `close()` races an inspection.
-
-A `current_authorization` predicate is **mandatory**. The trusted future
-transport must supply a fresh, independently verified owner/client/device/
-project grant **and session state**; a missing, non-Boolean, failing or
-revoked predicate returns a generic denial. The dispatcher checks it before
-and after local file inspection. Test harnesses provide explicit synthetic
-predicates: **a test predicate returning True is not a production grant**.
-Tests cover revoked grants before and during a blocked read, repeated request
-IDs with new sequence numbers, provider failures and disconnect races.
-
-The future transport MUST call `close()` when a verified socket disconnects,
-a grant is revoked or a session expires. The checks here are not an atomic
-delivery authorization: the real server/transport must independently enforce
-a current grant and connection binding immediately before sending any response,
-to avoid revocation races after this method returns. It contains **no live
-transport, OAuth verifier, server credential, owner enrollment, automatic
-project map, native KiCad execution, file content reader or background
-worker**.
-
-`test_isolated_read_dispatch_websocket.py` connects this dispatcher
-to a **synthetic fake Cloud over localhost-only WSS**, with ephemeral
-Ed25519 device/session signatures and a temporary TLS certificate.
-Its test-only read envelope supplies a fixture sequence; the locally
-trusted test harness supplies the actual authorized sequence and an
-operator-selected project mapping, **never a sequence/authorization
-from the wire itself**. The allowed request returns only three file
-presence booleans. A remote `run_drc` request is rejected and
-the fake WebSocket closes. Read-after-disconnect is denied.
-
-**These are NOT current Cloud protocol frames.** The real Cloud v1
-WebSocket implementation still deliberately rejects all application
-messages after `connector.ready`. Actual authorized Cloud-to-local
-read dispatch requires a separate security-reviewed protocol extension,
-signed server-side PostgreSQL grant verification and immutable socket
-context, explicit project owner approval, a revocation notice and
-controlled trust-root configuration. Do not enable production flags or
-present this offline test as live KiCad connectivity.
-
-## Opt-in outbound Cloud proof handshake (candidate code, NOT live service)
-
-`cloud_outbound_handshake.py` now provides an **explicitly invoked**,
-import-only TLS/WebSocket **handshake-only** client. The caller must supply
-an independently trusted `https://` origin and its exact matching
-`trusted_origin`, an owner identity, canonical device UUID and in-memory
-Ed25519 signing key. No env-secret lookup, background process, local KiCad
-server, key generation/persistence or pairing is performed by this module.
-
-The client builds only the fixed `/api/v1/connector/ws` path using `wss://`,
-requires a verifiable TLS certificate **and hostname** (custom trust roots
-may be used for enterprise CA or isolated tests, but `CERT_NONE` is
-rejected), disables compression and browser origin/cookies, restricts inbound
-frames to 1 KiB, and limits the total proof exchange to nine seconds.
-After TLS it performs `device.hello`, validates and signs the Cloud v1
-device challenge, validates and signs the connection-bound session
-challenge, then validates `connector.ready`. It **closes the socket
-immediately on success** and returns only a receipt that is **not** an
-authorization to execute, deliver a command or read a project.
-
-`tests/cloud/test_opt_in_outbound_handshake.py` executes this actual
-candidate client with an ephemeral localhost WSS peer and verifies
-certificate/hostname rejection **before sending any proof**; also denies
-wrong device, unexpected message phase/version, invalid/mismatching
-origins, unverified TLS, and malformed owner/device configuration.
-
-The `websockets` dependency is promoted from development-only to runtime
-because this new import-only helper uses it. **No end-user command,
-UI control, timer, daemon, credential file, network service or production
-feature flag is added.** This deliberately does NOT keep a device online:
-real Cloud-to-local read delivery, per-socket authorization, owner OAuth
-login/consent, revoked-device reconnect handling, on-device key custody
-and approved project binding remain separately gated. A synthetic test
-certificate or fixture credentials must never be used with production.
-
-## Gates before any live connection
-
-1. Complete a separate owner-controlled enrollment and actual OAuth
-   user consent/authorization, with revocable Ed25519 device credentials
-   stored in an approved local keystore.
-2. Review a transport that authenticates the remote Cloud endpoint and
-   binds accepted requests to *verified* Cloud session, project grants
-   and this local device. Upgrade/read dispatch is **not implemented** by
-   this PR. Test full revocation, expiry, abort, and reconnect against an
-   isolated Cloud/PostgreSQL instance first.
-3. Require a human-selected, explicitly enabled project map; obtain an
-   owner-approved test project before performing any real KiCad DRC/ERC.
-   Avoid disclosing project paths or contents to Cloud.
-4. Prove network/TLS and ingress-source trust, distributed rate limits
-   and device proof on an accepted private test environment; do not
-   bypass the current production device-ingress security block.
-5. Keep production pairing, WebSocket and write/manufacturing flags OFF
-   until every above check passes independently.
+**Release blockers:** verified real-owner login/consent and device enrollment
+in a privately approved isolated environment, review of trusted TLS ingress
+and device-source rules, revocation during an actual local read, both PRs'
+exact-head CI/security acceptance, and separate explicit production approval.
+Until then, both PRs remain DRAFT and production flags remain OFF.
