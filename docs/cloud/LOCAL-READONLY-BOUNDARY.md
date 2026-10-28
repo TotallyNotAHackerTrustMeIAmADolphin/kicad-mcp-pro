@@ -121,7 +121,7 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
 - Owner PEM and pairing sidecar reads use pinned no-follow descriptor
   access with nonblocking opens: substituting a FIFO for either
   basename cannot hang the CLI before the regular-file/owner/mode
-  checks. The two negative subprocess tests fail closed without any
+  checks. The two negative thread-bounded tests fail closed without any
   network or production access.
 - Ed25519 device/session signatures use domain-separated Cloud v1 bytes.
   The local client checks hostname and CA before signing; compressed
