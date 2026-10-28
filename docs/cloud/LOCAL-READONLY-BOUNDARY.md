@@ -136,6 +136,11 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   These mismatches were reproduced as failing tests before correction. Pairing
   requests use verified HTTPS, bounded response size, **no redirects or
   automatic retries**. Owner keys use exclusive creation and mode 0600.
+  When reopening an owner key or its origin/device-binding sidecar, the client
+  also requires exactly one hard-link reference (`st_nlink == 1`) on the
+  pinned, no-follow regular-file descriptor. Hard-linked aliases are denied
+  even when both names are same-owner mode 0600; this does **not** provide
+  independent owner authentication against a same-UID/admin-capable agent.
 - Only `project_summary` is accepted. Native KiCad execution, DRC/ERC,
   PCB mutation, manufacturing/export, local path discovery and arbitrary
   file reads are all denied. There is no background worker, persistent

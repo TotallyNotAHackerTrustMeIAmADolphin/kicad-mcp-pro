@@ -357,6 +357,41 @@ def test_owner_key_directory_walk_denies_traversal_and_symlink_ancestors(
     assert _load_owner_key(keyfile)
 
 
+def test_hardlinked_owner_key_and_pairing_record_are_not_trusted(tmp_path: Path) -> None:
+    """A 0600 regular file can still be a hard link to another owner path.
+
+    Reject multiply-linked trust records; same-user access to the transport
+    key is a *separate* and still unresolved human-authorization problem.
+    """
+    safe = tmp_path / "owner"
+    safe.mkdir(mode=0o700)
+    keyfile = safe / "device.pem"
+    cloud_pair._create_private_key(keyfile)
+    fingerprint = hashlib.sha256(
+        _load_owner_key(keyfile)
+        .public_key()
+        .public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    ).hexdigest()
+    cloud_pair._save_owner_binding(
+        keyfile, origin="https://localhost", device_id=DEVICE, fingerprint=fingerprint
+    )
+    record = keyfile.with_name(keyfile.name + ".cloud-binding-v1.json")
+    linked_key = safe / "other-device.pem"
+    os.link(keyfile, linked_key)
+    with pytest.raises(LocalApprovalDeniedError):
+        _load_owner_key(keyfile)
+    with pytest.raises(LocalApprovalDeniedError):
+        _load_owner_key(linked_key)
+    linked_key.unlink()
+    linked_record = safe / "another-binding.json"
+    os.link(record, linked_record)
+    with pytest.raises(LocalApprovalDeniedError):
+        cloud_once._read_owner_binding(keyfile)
+    linked_record.unlink()
+    assert isinstance(_load_owner_key(keyfile).public_key(), Ed25519PublicKey)
+    assert cloud_once._read_owner_binding(keyfile)["deviceId"] == DEVICE
+
+
 def test_owner_private_key_read_resists_directory_swap_after_fd_pin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

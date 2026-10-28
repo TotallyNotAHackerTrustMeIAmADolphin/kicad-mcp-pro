@@ -103,6 +103,7 @@ def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_uid != getuid()
+            or metadata.st_nlink != 1
             or metadata.st_mode & 0o077
             or not 1 <= metadata.st_size <= 8192
         ):
@@ -139,6 +140,7 @@ def _read_owner_binding(filename: Path) -> dict[str, str]:
         if (
             not stat.S_ISREG(metadata.st_mode)
             or metadata.st_uid != getuid()
+            or metadata.st_nlink != 1
             or metadata.st_mode & 0o077
             or not 1 <= metadata.st_size <= 512
         ):
