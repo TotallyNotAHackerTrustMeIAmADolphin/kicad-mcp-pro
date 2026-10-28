@@ -371,8 +371,9 @@ def test_local_lease_expires_on_monotonic_clock_even_if_wall_clock_rolled_back(
         assert dispatcher.read(frame(READ), sequence=1)["files"]["projectPresent"] is True
         clock["monotonic_ns"] += 1_000_000_000
         assert dispatcher._current_authorization() is False
+        expired_frame = frame("66666666-6666-4666-8666-666666666666")
         with pytest.raises(LocalReadDeniedError):
-            dispatcher.read(frame("66666666-6666-4666-8666-666666666666"), sequence=2)
+            dispatcher.read(expired_frame, sequence=2)
         dispatcher.close()
         return receipt
 
@@ -414,8 +415,9 @@ def test_one_shot_cli_grant_rejects_second_read_even_when_lease_valid(
 
         assert dispatcher.read(frame(READ), sequence=1)["files"]["projectPresent"] is True
         assert dispatcher._current_authorization() is True
+        second_frame = frame("55555555-5555-4555-8555-555555555555")
         with pytest.raises(LocalReadDeniedError):
-            dispatcher.read(frame("55555555-5555-4555-8555-555555555555"), sequence=2)
+            dispatcher.read(second_frame, sequence=2)
         dispatcher.close()
         return receipt
 

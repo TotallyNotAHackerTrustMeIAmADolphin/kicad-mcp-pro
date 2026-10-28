@@ -114,18 +114,22 @@ def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
 
 def _read_owner_binding(filename: Path) -> dict[str, str]:
     """Read owner-only pairing metadata by a pinned no-follow directory FD."""
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    getuid = getattr(os, "getuid", None)
+    if type(nofollow) is not int or not callable(getuid):
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
     directory_fd = _open_owner_private_dir(filename)
     descriptor: int | None = None
     try:
         descriptor = os.open(
             filename.name + _BINDING_SUFFIX,
-            os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
             dir_fd=directory_fd,
         )
         metadata = os.fstat(descriptor)
         if (
             not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
+            or metadata.st_uid != getuid()
             or metadata.st_mode & 0o077
             or not 1 <= metadata.st_size <= 512
         ):
@@ -175,6 +179,9 @@ def _save_owner_binding(filename: Path, *, origin: str, device_id: str, fingerpr
         or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None
     ):
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if type(nofollow) is not int:
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
     directory_fd = _open_owner_private_dir(filename)
     descriptor: int | None = None
     created = False
@@ -182,7 +189,7 @@ def _save_owner_binding(filename: Path, *, origin: str, device_id: str, fingerpr
         try:
             descriptor = os.open(
                 filename.name + _BINDING_SUFFIX,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | getattr(os, "O_CLOEXEC", 0),
                 0o600,
                 dir_fd=directory_fd,
             )
