@@ -128,14 +128,28 @@ enable production pairing or WebSocket flags.**
 The local-only `cloud_read_dispatch.py` provides a single-session
 `LocalReadDispatch` for **already independently authorized** local reads.
 It enforces one read at a time, strictly advancing sequence numbers,
-a maximum of 32 reads per session, the existing approved device/project
-file-presence boundary and deadline re-validation **after** inspection.
-It consumes sequences even on denied inspections and permanently fences
-an in-flight result if `close()` races an inspection. The future transport
-MUST call `close()` when a verified socket disconnects, a grant is revoked
-or a session expires. It contains **no live transport, OAuth verifier,
-server credential, owner enrollment, automatic project map, native KiCad
-execution, file content reader or background worker**.
+a maximum of 32 reads per session, **unique request IDs**, the existing
+approved device/project file-presence boundary and deadline re-validation
+**after** inspection. It consumes sequences even on denied inspections
+and permanently fences an in-flight result if `close()` races an inspection.
+
+A `current_authorization` predicate is **mandatory**. The trusted future
+transport must supply a fresh, independently verified owner/client/device/
+project grant **and session state**; a missing, non-Boolean, failing or
+revoked predicate returns a generic denial. The dispatcher checks it before
+and after local file inspection. Test harnesses provide explicit synthetic
+predicates: **a test predicate returning True is not a production grant**.
+Tests cover revoked grants before and during a blocked read, repeated request
+IDs with new sequence numbers, provider failures and disconnect races.
+
+The future transport MUST call `close()` when a verified socket disconnects,
+a grant is revoked or a session expires. The checks here are not an atomic
+delivery authorization: the real server/transport must independently enforce
+a current grant and connection binding immediately before sending any response,
+to avoid revocation races after this method returns. It contains **no live
+transport, OAuth verifier, server credential, owner enrollment, automatic
+project map, native KiCad execution, file content reader or background
+worker**.
 
 `test_isolated_read_dispatch_websocket.py` connects this dispatcher
 to a **synthetic fake Cloud over localhost-only WSS**, with ephemeral

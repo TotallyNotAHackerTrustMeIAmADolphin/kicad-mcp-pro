@@ -64,6 +64,7 @@ async def _exercise(tmp_path: Path, *, forbidden: bool) -> dict[str, object]:
             DEVICE, PROJECT, frozenset({"project_summary"}), SESSION, clock() + 60_000
         ),
         operator_project=owner_policy,
+        current_authorization=lambda: True,  # Synthetic, no real OAuth grant
     )
     observations: dict[str, object] = {}
 
