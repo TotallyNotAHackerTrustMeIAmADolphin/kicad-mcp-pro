@@ -44,6 +44,560 @@ def test_ipc_summary_is_read_only(tmp_path: Path) -> None:
     board.get_selection.assert_called_once_with()
 
 
+def test_saved_drc_live_selection_verifies_exact_persistent_ids_before_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    import companion_core
+
+    ids = ("5a2b4282-959d-4648-89ef-3e8e655765a2", "71617dd7-0e7e-436f-af97-312daa1427d3")
+    board_path = tmp_path / "test.kicad_pcb"
+    board_path.write_text("\n".join(f'(uuid "{uid}")' for uid in ids))
+    sha = hashlib.sha256(board_path.read_bytes()).hexdigest()
+    finding = companion_core.DrcFinding(
+        "error", "shorting_items", "bad copper", ("Pad R1", "Track"), None, ids, 2
+    )
+    result = companion_core.SavedDrcResult(
+        1, 0, 0, 0, "10.0.7", (finding,), "mm", str(board_path), sha
+    )
+
+    class BoardItem:
+        def __init__(self, uid: str) -> None:
+            self.id = SimpleNamespace(value=uid)
+
+    items = {uid: BoardItem(uid) for uid in ids}
+    board = Mock()
+    board.name = board_path.name
+    board.get_project.return_value.path = str(tmp_path)
+    board.get_items_by_id.side_effect = lambda key: [items[key.value]]
+    client = Mock()
+    client.get_board.return_value = board
+    kiid = ModuleType("kipy.common_types")
+    kiid.KIID = lambda *, value: SimpleNamespace(value=value)
+    types_mod = ModuleType("kipy.board_types")
+    types_mod.BoardItem = BoardItem
+    monkeypatch.setitem(sys.modules, "kipy.common_types", kiid)
+    monkeypatch.setitem(sys.modules, "kipy.board_types", types_mod)
+    assert companion_core.select_verified_saved_drc_items(result, finding, lambda: client) == 2
+    board.clear_selection.assert_called_once_with()
+    board.add_to_selection.assert_called_once_with([items[ids[0]], items[ids[1]]])
+
+    board.clear_selection.reset_mock()
+    board.add_to_selection.reset_mock()
+    board.get_items_by_id.side_effect = lambda key: (
+        [items[key.value]] if key.value == ids[0] else []
+    )
+    with pytest.raises(RuntimeError, match="uniquely match"):
+        companion_core.select_verified_saved_drc_items(result, finding, lambda: client)
+    board.clear_selection.assert_not_called()
+    board.add_to_selection.assert_not_called()
+    board.get_items_by_id.side_effect = lambda key: [SimpleNamespace(id=SimpleNamespace(value=1))]
+    with pytest.raises(RuntimeError, match="selectable KiCad item"):
+        companion_core.select_verified_saved_drc_items(result, finding, lambda: client)
+    board.clear_selection.assert_not_called()
+    board.add_to_selection.assert_not_called()
+    board.get_items_by_id.side_effect = lambda key: [items[key.value]]
+
+    board_path.write_text("modified")
+    with pytest.raises(RuntimeError, match="changed"):
+        companion_core.select_verified_saved_drc_items(result, finding, lambda: client)
+    board.clear_selection.assert_not_called()
+
+
+def test_saved_drc_selection_rejects_ephemeral_ids_and_unmatched_editor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    import companion_core
+
+    uid = "71617dd7-0e7e-436f-af97-312daa1427d3"
+    path = tmp_path / "test.kicad_pcb"
+    path.write_text("KiCad fixture without persistent ids")
+    h = hashlib.sha256(path.read_bytes()).hexdigest()
+    finding = companion_core.DrcFinding(
+        "error", "unconnected_items", "broken", ("R1",), None, (uid,), 1
+    )
+    result = companion_core.SavedDrcResult(1, 0, 0, 0, "10.0.7", (finding,), "mm", str(path), h)
+    board = Mock()
+    board.name = path.name
+    board.get_project.return_value.path = str(tmp_path)
+    client = Mock()
+    client.get_board.return_value = board
+    kiid = ModuleType("kipy.common_types")
+    kiid.KIID = lambda *, value: SimpleNamespace(value=value)
+    types_mod = ModuleType("kipy.board_types")
+    types_mod.BoardItem = type("BoardItem", (), {})
+    monkeypatch.setitem(sys.modules, "kipy.common_types", kiid)
+    monkeypatch.setitem(sys.modules, "kipy.board_types", types_mod)
+    with pytest.raises(RuntimeError, match="persistent UUID"):
+        companion_core.select_verified_saved_drc_items(result, finding, lambda: client)
+    board.get_items_by_id.assert_not_called()
+    board.clear_selection.assert_not_called()
+
+    path.write_text(f'(uuid "{uid}")')
+    result = companion_core.SavedDrcResult(
+        1,
+        0,
+        0,
+        0,
+        "10.0.7",
+        (finding,),
+        "mm",
+        str(path),
+        hashlib.sha256(path.read_bytes()).hexdigest(),
+    )
+    board.get_project.return_value.path = str(tmp_path / "other-project")
+    with pytest.raises(RuntimeError, match="Active KiCad board"):
+        companion_core.select_verified_saved_drc_items(result, finding, lambda: client)
+    board.clear_selection.assert_not_called()
+
+
+def test_live_drc_preflight_disables_text_fields_without_mutating_editor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    import sys
+    from types import ModuleType, SimpleNamespace
+
+    import companion_core
+
+    track = "71617dd7-0e7e-436f-af97-312daa1427d3"
+    field = "0cf535e6-08f4-4505-ac7e-2ece4a97f5da"
+    saved = tmp_path / "board.kicad_pcb"
+    saved.write_text(f'(uuid "{track}")\n(uuid "{field}")', encoding="utf-8")
+    first = companion_core.DrcFinding(
+        "error", "shorting_items", "track", item_ids=(track,), reported_item_count=1
+    )
+    second = companion_core.DrcFinding(
+        "warning", "silk_over_copper", "ref text", item_ids=(field,), reported_item_count=1
+    )
+    report = companion_core.SavedDrcResult(
+        1,
+        1,
+        0,
+        0,
+        "10.0.7",
+        (first, second),
+        "mm",
+        str(saved),
+        hashlib.sha256(saved.read_bytes()).hexdigest(),
+        (field, track),
+    )
+
+    class BoardItem:
+        def __init__(self, id_value: str) -> None:
+            self.id = SimpleNamespace(value=id_value)
+
+    class Field:
+        def __init__(self) -> None:
+            self.id = SimpleNamespace(value=1)
+
+    board = Mock()
+    board.name = saved.name
+    board.get_project.return_value.path = str(tmp_path)
+    board.get_items_by_id.side_effect = lambda key: (
+        [BoardItem(track)] if key.value == track else [Field()]
+    )
+    client = Mock()
+    client.get_board.return_value = board
+    kiid = ModuleType("kipy.common_types")
+    kiid.KIID = lambda *, value: SimpleNamespace(value=value)
+    model = ModuleType("kipy.board_types")
+    model.BoardItem = BoardItem
+    monkeypatch.setitem(sys.modules, "kipy.common_types", kiid)
+    monkeypatch.setitem(sys.modules, "kipy.board_types", model)
+    assert companion_core.inspect_live_drc_selectability(report, lambda: client) == (0,)
+    board.clear_selection.assert_not_called()
+    board.add_to_selection.assert_not_called()
+
+    saved.write_text("changed", encoding="utf-8")
+    assert companion_core.inspect_live_drc_selectability(report, lambda: client) == ()
+    board.clear_selection.assert_not_called()
+
+
+def test_live_drc_preflight_unavailable_ipc_fails_closed(tmp_path: Path) -> None:
+    import companion_core
+
+    report = companion_core.SavedDrcResult(
+        1,
+        0,
+        0,
+        0,
+        "10.0.7",
+        (
+            companion_core.DrcFinding(
+                "error", "short", "bad", item_ids=("abc",), reported_item_count=1
+            ),
+        ),
+    )
+    assert (
+        companion_core.inspect_live_drc_selectability(
+            report, lambda: (_ for _ in ()).throw(ConnectionError("IPC gone"))
+        )
+        == ()
+    )
+
+
+def test_saved_drc_uses_private_snapshot_no_cli_write_to_original(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import companion_core
+
+    board = tmp_path / "safe.kicad_pcb"
+    board.write_text("board-bytes", encoding="utf-8")
+    (tmp_path / "safe.kicad_pro").write_text("project-rules", encoding="utf-8")
+    (tmp_path / "safe.kicad_dru").write_text("custom-rules", encoding="utf-8")
+    source_files = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    summary = companion_core.BoardSummary(
+        "safe.kicad_pcb", "safe", 1, 1, 0, str(tmp_path / "safe.kicad_pro")
+    )
+
+    def fake_cli(argv: list[str], **kwargs: object) -> SimpleNamespace:
+        assert argv[:6] == ["kicad-cli", "pcb", "drc", "--format", "json", "--output"]
+        assert kwargs["shell"] is False
+        assert kwargs["timeout"] == 45
+        copied = Path(argv[-1])
+        assert copied != board
+        assert copied.read_bytes() == b"board-bytes"
+        assert (copied.parent / "safe.kicad_pro").read_bytes() == b"project-rules"
+        assert (copied.parent / "safe.kicad_dru").read_bytes() == b"custom-rules"
+        assert "--save-board" not in argv
+        assert "--refill-zones" not in argv
+        report = {
+            "source": "safe.kicad_pcb",
+            "kicad_version": "10.0.7",
+            "violations": [
+                {"severity": "error"},
+                {"severity": "warning"},
+            ],
+            "unconnected_items": [{"severity": "error"}],
+        }
+        Path(argv[-2]).write_text(json.dumps(report), encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(companion_core.subprocess, "run", fake_cli)
+    result = companion_core.run_saved_board_drc(summary)
+    assert (result.errors, result.warnings, result.unconnected) == (1, 1, 1)
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == source_files
+
+
+def test_saved_drc_rejects_outside_project_path_and_cli_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from types import SimpleNamespace
+
+    import companion_core
+
+    (tmp_path / "safe.kicad_pcb").write_text("board", encoding="utf-8")
+    summary = companion_core.BoardSummary("../other.kicad_pcb", "demo", 1, 1, 0, str(tmp_path))
+    with pytest.raises(RuntimeError, match="project directory"):
+        companion_core.run_saved_board_drc(summary)
+    summary = companion_core.BoardSummary("safe.kicad_pcb", "demo", 1, 1, 0, str(tmp_path))
+    monkeypatch.setattr(
+        companion_core.subprocess, "run", lambda *_a, **_kw: SimpleNamespace(returncode=1)
+    )
+    with pytest.raises(RuntimeError, match="complete DRC report"):
+        companion_core.run_saved_board_drc(summary)
+
+    def timeout(*_a: object, **_kw: object) -> None:
+        raise companion_core.subprocess.TimeoutExpired("kicad-cli", 45)
+
+    monkeypatch.setattr(companion_core.subprocess, "run", timeout)
+    with pytest.raises(RuntimeError, match="could not finish"):
+        companion_core.run_saved_board_drc(summary)
+
+
+def test_saved_drc_disallows_invalid_or_mismatched_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import companion_core
+
+    (tmp_path / "safe.kicad_pcb").write_text("board", encoding="utf-8")
+    summary = companion_core.BoardSummary("safe.kicad_pcb", "demo", 1, 1, 0, str(tmp_path))
+
+    def wrong_source(argv: list[str], **_kw: object) -> SimpleNamespace:
+        Path(argv[-2]).write_text(
+            json.dumps(
+                {
+                    "source": "other.kicad_pcb",
+                    "kicad_version": "10.0.7",
+                    "violations": [],
+                    "unconnected_items": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(companion_core.subprocess, "run", wrong_source)
+    with pytest.raises(RuntimeError, match="mismatched"):
+        companion_core.run_saved_board_drc(summary)
+
+
+def test_saved_drc_preserves_rule_item_coordinates_and_rejects_non_finite_positions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import companion_core
+
+    (tmp_path / "safe.kicad_pcb").write_text("board", encoding="utf-8")
+    summary = companion_core.BoardSummary("safe.kicad_pcb", "demo", 1, 1, 0, str(tmp_path))
+
+    def sample_cli(argv: list[str], **_kw: object) -> SimpleNamespace:
+        Path(argv[-2]).write_text(
+            json.dumps(
+                {
+                    "source": "safe.kicad_pcb",
+                    "kicad_version": "10.0.7",
+                    "coordinate_units": "mm",
+                    "violations": [
+                        {
+                            "severity": "warning",
+                            "type": "silk_over_copper",
+                            "description": "Silkscreen overlap",
+                            "items": [{"description": "Pad 1 of R1", "pos": {"x": "nan", "y": 2}}],
+                        },
+                        {
+                            "severity": "error",
+                            "type": "shorting_items",
+                            "description": "Different nets shorted",
+                            "items": [
+                                {"description": "Pad 2 [GND] of R1", "pos": {"x": 11.5, "y": 9.25}}
+                            ],
+                        },
+                    ],
+                    "unconnected_items": [
+                        {
+                            "severity": "error",
+                            "type": "unconnected_items",
+                            "description": "Missing connection",
+                            "items": [
+                                {"description": "Track [LED_A] F.Cu", "pos": {"x": 12, "y": 10}}
+                            ],
+                        },
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(companion_core.subprocess, "run", sample_cli)
+    result = companion_core.run_saved_board_drc(summary)
+    assert len(result.findings) == 3
+    assert [finding.check_type for finding in result.findings] == [
+        "shorting_items",
+        "unconnected_items",
+        "silk_over_copper",
+    ]
+    assert result.findings[0].objects == ("Pad 2 [GND] of R1",)
+    assert result.findings[0].location == (11.5, 9.25)
+    assert result.findings[-1].location is None  # no invented coordinate
+    assert result.coordinate_units == "mm"
+
+
+def test_saved_drc_fails_closed_on_invalid_affected_item_structure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import companion_core
+
+    (tmp_path / "safe.kicad_pcb").write_text("board", encoding="utf-8")
+    summary = companion_core.BoardSummary("safe.kicad_pcb", "demo", 1, 1, 0, str(tmp_path))
+
+    def bad_cli(argv: list[str], **_kw: object) -> SimpleNamespace:
+        Path(argv[-2]).write_text(
+            json.dumps(
+                {
+                    "source": "safe.kicad_pcb",
+                    "kicad_version": "10.0.7",
+                    "violations": [{"severity": "error", "items": ["not-an-object"]}],
+                    "unconnected_items": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(companion_core.subprocess, "run", bad_cli)
+    with pytest.raises(RuntimeError, match="malformed affected items"):
+        companion_core.run_saved_board_drc(summary)
+
+
+def test_saved_drc_rejects_concurrently_changed_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    import companion_core
+
+    board = tmp_path / "safe.kicad_pcb"
+    board.write_text("original", encoding="utf-8")
+    summary = companion_core.BoardSummary("safe.kicad_pcb", "demo", 1, 1, 0, str(tmp_path))
+
+    def mutate_during_check(argv: list[str], **_kw: object) -> SimpleNamespace:
+        Path(argv[-2]).write_text(
+            json.dumps(
+                {
+                    "source": "safe.kicad_pcb",
+                    "kicad_version": "10.0.7",
+                    "violations": [],
+                    "unconnected_items": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        board.write_text("changed during CLI", encoding="utf-8")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(companion_core.subprocess, "run", mutate_during_check)
+    with pytest.raises(RuntimeError, match="changed during DRC"):
+        companion_core.run_saved_board_drc(summary)
+
+
+def test_ipc_footprint_reference_field_is_used_for_selection(tmp_path: Path) -> None:
+    """Actual kicad-python FootprintInstance exposes reference_field.text.value."""
+    selected = Mock(spec=["reference_field"])
+    selected.reference_field.text.value = "LED1"
+    board = Mock()
+    board.name = "live.kicad_pcb"
+    board.get_project.return_value.name = "live"
+    board.get_project.return_value.path = str(tmp_path / "live.kicad_pro")
+    board.get_footprints.return_value = [selected]
+    board.get_nets.return_value = [object()]
+    board.get_selection.return_value = [selected]
+    client = Mock()
+    client.get_board.return_value = board
+    result = board_summary(lambda: client)
+    assert result.selected == 1
+    assert result.selected_reference == "LED1"
+
+
+def test_single_selected_footprint_inspector_reads_value_pads_and_net_names(tmp_path: Path) -> None:
+    selected = Mock(spec=["reference_field", "value_field", "definition"])
+    selected.reference_field.text.value = "R1"
+    selected.value_field.text.value = "1k"
+    selected.definition.id.library = "Resistor_SMD"
+    selected.definition.id.name = "R_0603_1608Metric"
+    pad1 = Mock()
+    pad1.net.name = "LED_A"
+    pad2 = Mock()
+    pad2.net.name = ""
+    selected.definition.pads = [pad1, pad2]
+    board = Mock()
+    board.name = "read-only.kicad_pcb"
+    board.get_project.return_value.name = "demo"
+    board.get_project.return_value.path = str(tmp_path / "demo")
+    board.get_footprints.return_value = [selected]
+    board.get_nets.return_value = [Mock()]
+    board.get_selection.return_value = [selected]
+    client = Mock()
+    client.get_board.return_value = board
+
+    result = board_summary(lambda: client)
+    assert result.selected_reference == "R1"
+    assert result.selected_value == "1k"
+    assert result.selected_footprint == "Resistor_SMD:R_0603_1608Metric"
+    assert result.selected_pad_count == 2
+    assert result.selected_nets == ("LED_A",)
+    assert result.selected_unconnected_pads == 1
+    board.get_selection.assert_called_once_with()
+
+
+def test_single_footprint_same_net_lists_other_references_without_routing_claims(
+    tmp_path: Path,
+) -> None:
+    def footprint(ref: str, *net_names: str) -> Mock:
+        item = Mock(spec=["reference_field", "definition"])
+        item.reference_field.text.value = ref
+        pads = []
+        for name in net_names:
+            pad = Mock()
+            pad.net.name = name
+            pads.append(pad)
+        item.definition.pads = pads
+        return item
+
+    r1 = footprint("R1", "LED_A", "LED_A", "")
+    led1 = footprint("LED1", "LED_A")
+    c1 = footprint("C1", "GND")
+    board = Mock()
+    board.name = "clean-led.kicad_pcb"
+    board.get_project.return_value.name = "clean-led"
+    board.get_project.return_value.path = str(tmp_path / "clean-led.kicad_pro")
+    board.get_footprints.return_value = [c1, led1, r1]
+    board.get_nets.return_value = [Mock(), Mock()]
+    board.get_selection.return_value = [r1]
+    client = Mock()
+    client.get_board.return_value = board
+
+    summary = board_summary(lambda: client)
+    assert summary.selected_reference == "R1"
+    assert summary.selected_nets == ("LED_A",)
+    assert summary.selected_net_peers == (("LED_A", ("LED1",)),)
+    board.get_footprints.assert_called_once()
+
+
+def test_same_net_peers_empty_for_unassigned_only_selection(tmp_path: Path) -> None:
+    selected = Mock(spec=["reference_field", "definition"])
+    selected.reference_field.text.value = "U1"
+    pad = Mock()
+    pad.net.name = ""
+    selected.definition.pads = [pad]
+    board = Mock()
+    board.name = "floating.kicad_pcb"
+    board.get_project.return_value.name = "floating"
+    board.get_project.return_value.path = str(tmp_path / "floating.kicad_pro")
+    board.get_footprints.return_value = [selected]
+    board.get_nets.return_value = []
+    board.get_selection.return_value = [selected]
+    client = Mock()
+    client.get_board.return_value = board
+
+    assert board_summary(lambda: client).selected_net_peers == ()
+
+
+def test_multiple_selection_does_not_show_first_footprint_as_sole_inspected_item(
+    tmp_path: Path,
+) -> None:
+    board = Mock()
+    board.name = "many.kicad_pcb"
+    board.get_project.return_value.name = "demo"
+    board.get_project.return_value.path = str(tmp_path / "demo")
+    board.get_footprints.return_value = [Mock(), Mock()]
+    board.get_nets.return_value = []
+    a = Mock()
+    b = Mock()
+    a.reference_field.text.value = "R1"
+    b.reference_field.text.value = "C1"
+    board.get_selection.return_value = [a, b]
+    client = Mock()
+    client.get_board.return_value = board
+    result = board_summary(lambda: client)
+    assert result.selected == 2
+    assert result.selected_reference == ""
+    assert result.selected_footprint == ""
+    assert result.selected_nets == ()
+    assert result.selected_net_peers == ()
+
+
 def test_unavailable_kicad_reports_failure() -> None:
     def disconnected() -> None:
         raise OSError("IPC disconnected")
