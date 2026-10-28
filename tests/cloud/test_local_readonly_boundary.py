@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from unittest.mock import patch
 
@@ -260,6 +261,52 @@ def test_operator_directory_rejects_excessive_depth(approved) -> None:
     folder = approved[1].directory.joinpath(*(["subdir"] * 129))
     with pytest.raises(LocalReadDeniedError):
         invoke(packet(), (approved[0], OperatorProject(DEVICE, PROJECT, folder, "Example")))
+
+
+def test_selected_directory_entry_limit_accepts_128_and_denies_129(approved) -> None:
+    folder = approved[1].directory
+    for i in range(125):
+        (folder / f"extra-{i}").touch()
+    assert invoke(packet(), approved)["files"] == {
+        "projectPresent": True,
+        "boardPresent": True,
+        "schematicPresent": True,
+    }
+    (folder / "extra-125").touch()
+    with pytest.raises(LocalReadDeniedError):
+        invoke(packet(), approved)
+
+
+def test_huge_selected_directory_stops_enumerating_at_entry_budget(
+    approved, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A local directory may contain millions of items. The read boundary
+    # must not build the entire listing before checking its 128-entry budget.
+    from kicad_mcp import cloud_readonly_boundary
+
+    seen: list[int] = []
+
+    class BoundedDirectory:
+        def __enter__(self) -> BoundedDirectory:
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        def __iter__(self) -> Iterator[object]:
+            for i in range(129):
+                seen.append(i)
+                yield type("DirectoryEntry", (), {"name": f"extra-{i}"})()
+            raise AssertionError("Directory scan crossed its fixed entry budget")
+
+    def reject_listdir(_fd: object) -> None:
+        raise AssertionError("Eager os.listdir is an unbounded allocation")
+
+    monkeypatch.setattr(cloud_readonly_boundary.os, "listdir", reject_listdir)
+    monkeypatch.setattr(cloud_readonly_boundary.os, "scandir", lambda _fd: BoundedDirectory())
+    with pytest.raises(LocalReadDeniedError):
+        invoke(packet(), approved)
+    assert len(seen) == 129
 
 
 def test_relative_operator_path_denied(approved) -> None:

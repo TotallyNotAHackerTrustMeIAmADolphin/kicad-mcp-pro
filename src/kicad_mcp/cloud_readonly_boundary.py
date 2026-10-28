@@ -166,9 +166,14 @@ def _read_presence_only(policy: OperatorProject) -> dict[str, bool]:
     descriptor: int | None = None
     try:
         descriptor = _open_operator_directory(path)
-        members = os.listdir(descriptor)
-        if len(members) > MAX_DIRECTORY_ENTRIES:
-            raise LocalReadDeniedError("request denied")
+        members: set[str] = set()
+        # os.listdir() eagerly materializes the entire directory before
+        # our entry cap can run. Stop scandir at the 129th entry instead.
+        with os.scandir(descriptor) as entries:
+            for index, member in enumerate(entries):
+                if index >= MAX_DIRECTORY_ENTRIES:
+                    raise LocalReadDeniedError("request denied")
+                members.add(member.name)
         result: dict[str, bool] = {}
         for label, suffix in (
             ("projectPresent", ".kicad_pro"),
