@@ -141,6 +141,18 @@ async def _scenario(tmp_path: Path, mode: str = "success") -> list[str]:
                 try:
                     answer = await ws.recv()
                     observations.append("answer:" + str(answer))
+                    reply = json.loads(answer)
+                    assert reply["kind"] == "connector.read_result"
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "kind": "connector.read_ack",
+                                "version": 1,
+                                "sequence": 1,
+                                "requestId": READ,
+                            }
+                        )
+                    )
                 except ConnectionClosed:
                     observations.append("read_denied")
         except Exception:

@@ -228,6 +228,19 @@ async def _perform_outbound_session(
                             separators=(",", ":"),
                         )
                     )
+                    raw_ack = await socket.recv()
+                    if not isinstance(raw_ack, str):
+                        raise CloudHandshakeDeniedError("handshake denied")
+                    ack = _read_strict_json(raw_ack, "connector.read_ack")
+                    if (
+                        set(ack) != {"kind", "version", "sequence", "requestId"}
+                        or type(ack["version"]) is not int
+                        or ack["version"] != 1
+                        or type(ack["sequence"]) is not int
+                        or ack["sequence"] != envelope["sequence"]
+                        or ack["requestId"] != response["requestId"]
+                    ):
+                        raise CloudHandshakeDeniedError("handshake denied")
                     return receipt
                 finally:
                     dispatcher.close()
