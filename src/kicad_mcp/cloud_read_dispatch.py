@@ -39,7 +39,11 @@ class LocalReadDispatch:
         operator_project: OperatorProject,
         current_authorization: Callable[[], bool],
         clock_ms: Callable[[], int] | None = None,
+        max_reads: int = MAX_READS_PER_SESSION,
     ) -> None:
+        if type(max_reads) is not int or not 1 <= max_reads <= MAX_READS_PER_SESSION:
+            raise LocalReadDeniedError(_READ_DENIED)
+        self._max_reads = max_reads
         self._verified = verified
         self._project = operator_project
         if not callable(current_authorization):
@@ -92,7 +96,7 @@ class LocalReadDispatch:
                 or self._busy
                 or type(sequence) is not int
                 or sequence != self._last_sequence + 1
-                or sequence > MAX_READS_PER_SESSION
+                or sequence > self._max_reads
             ):
                 raise LocalReadDeniedError(_READ_DENIED)
             self._busy = True

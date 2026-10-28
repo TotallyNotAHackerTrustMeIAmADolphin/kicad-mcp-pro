@@ -178,6 +178,7 @@ async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
                 filename_stem=options.filename_stem,
             ),
             current_authorization=lambda: time.monotonic_ns() < monotonic_cutoff,
+            max_reads=1,
         )
 
     return await execute_single_approved_read(

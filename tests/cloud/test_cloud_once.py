@@ -256,16 +256,57 @@ def test_local_lease_expires_on_monotonic_clock_even_if_wall_clock_rolled_back(
                 }
             ).encode()
 
-        assert dispatcher.read(frame(READ), sequence=1)["files"]["projectPresent"] is True
         clock["wall_ms"] -= 5_000
         clock["monotonic_ns"] += 29_000_000_000
-        # Even after the wall clock moves back, the monotonic budget allows
-        # requests strictly before 30 seconds and denies at the boundary.
-        allowed = frame("55555555-5555-4555-8555-555555555555")
-        assert dispatcher.read(allowed, sequence=2)["files"]["projectPresent"] is True
+        assert dispatcher._current_authorization() is True
+        assert dispatcher.read(frame(READ), sequence=1)["files"]["projectPresent"] is True
         clock["monotonic_ns"] += 1_000_000_000
+        assert dispatcher._current_authorization() is False
         with pytest.raises(LocalReadDeniedError):
-            dispatcher.read(frame("66666666-6666-4666-8666-666666666666"), sequence=3)
+            dispatcher.read(frame("66666666-6666-4666-8666-666666666666"), sequence=2)
+        dispatcher.close()
+        return receipt
+
+    monkeypatch.setattr(cloud_once, "execute_single_approved_read", fake_cloud)
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_: "APPROVE CAFEBABE")
+    monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
+    assert cloud_once.main(_args(folder, keyfile)) == 0
+
+
+def test_one_shot_cli_grant_rejects_second_read_even_when_lease_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "selected"
+    folder.mkdir()
+    (folder / "demo.kicad_pro").touch()
+    keyfile = _keyfile(tmp_path / "enrolled.pem")
+
+    async def fake_cloud(**kwargs: object) -> HandshakeReceipt:
+        factory = kwargs["dispatcher_factory"]
+        assert callable(factory)
+        receipt = HandshakeReceipt(DEVICE, SESSION)
+        dispatcher = factory(receipt)
+        deadline = int(time.time() * 1000) + 1000
+
+        def frame(request_id: str) -> bytes:
+            return json.dumps(
+                {
+                    "kind": "connector.read_request",
+                    "version": 1,
+                    "deviceId": DEVICE,
+                    "projectId": PROJECT,
+                    "requestId": request_id,
+                    "operation": "project_summary",
+                    "deadlineUnixMs": deadline,
+                }
+            ).encode()
+
+        assert dispatcher.read(frame(READ), sequence=1)["files"]["projectPresent"] is True
+        assert dispatcher._current_authorization() is True
+        with pytest.raises(LocalReadDeniedError):
+            dispatcher.read(frame("55555555-5555-4555-8555-555555555555"), sequence=2)
         dispatcher.close()
         return receipt
 

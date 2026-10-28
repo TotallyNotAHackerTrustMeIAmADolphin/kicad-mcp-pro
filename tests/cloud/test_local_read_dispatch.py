@@ -63,6 +63,35 @@ def subject(tmp_path: Path) -> LocalReadDispatch:
     )
 
 
+@pytest.mark.parametrize("limit", [0, -1, 33, True, 1.0, "1"])
+def test_read_budget_rejects_invalid_configurations(
+    subject: LocalReadDispatch, limit: object
+) -> None:
+    with pytest.raises(LocalReadDeniedError):
+        LocalReadDispatch(
+            verified=subject._verified,
+            operator_project=subject._project,
+            current_authorization=lambda: True,
+            max_reads=limit,
+        )
+
+
+def test_read_budget_one_denies_second_request_even_with_active_grant(
+    subject: LocalReadDispatch,
+) -> None:
+    one_shot = LocalReadDispatch(
+        verified=subject._verified,
+        operator_project=subject._project,
+        current_authorization=lambda: True,
+        clock_ms=lambda: NOW,
+        max_reads=1,
+    )
+    assert one_shot.read(packet(), sequence=1)["files"]["projectPresent"] is True
+    later = packet("55555555-5555-4555-8555-555555555555")
+    with pytest.raises(LocalReadDeniedError):
+        one_shot.read(later, sequence=2)
+
+
 def test_only_metadata_returned_and_no_write(subject: LocalReadDispatch) -> None:
     reply = subject.read(packet(), sequence=1)
     assert reply["files"] == {
