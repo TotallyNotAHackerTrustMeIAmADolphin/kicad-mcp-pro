@@ -124,10 +124,25 @@ def _open_operator_directory(folder: Path) -> int:
     nofollow_flag = getattr(os, "O_NOFOLLOW", None)
     if os.name != "posix" or type(dir_flag) is not int or type(nofollow_flag) is not int:
         raise LocalReadDeniedError("request denied")
+    # This is an owner-selected absolute directory, never a path supplied by
+    # the Cloud request. Refuse lexical upward navigation before the openat
+    # walk, even though O_NOFOLLOW already rejects symlink substitution.
+    if not isinstance(folder, Path) or not folder.is_absolute():
+        raise LocalReadDeniedError("request denied")
+    components = folder.parts[1:]
+    if (
+        not components
+        or len(components) > 128
+        or any(
+            component in {"", ".", ".."} or "\x00" in component or len(os.fsencode(component)) > 255
+            for component in components
+        )
+    ):
+        raise LocalReadDeniedError("request denied")
     flags = os.O_RDONLY | dir_flag | nofollow_flag
     descriptor = os.open("/", flags)
     try:
-        for component in folder.parts[1:]:
+        for component in components:
             next_descriptor = os.open(component, flags, dir_fd=descriptor)
             os.close(descriptor)
             descriptor = next_descriptor

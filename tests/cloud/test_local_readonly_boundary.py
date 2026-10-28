@@ -201,6 +201,22 @@ def test_directory_entry_budget_denies_surprise_mass_scan(approved) -> None:
         invoke(packet(), approved)
 
 
+def test_operator_directory_rejects_lexical_parent_navigation(approved) -> None:
+    folder = approved[1].directory
+    # This resolves to the same legitimate directory on a normal POSIX
+    # filesystem; a secure descriptor walk must still reject the parent hop.
+    traversed = folder.parent / ".." / folder.parent.name / folder.name
+    assert ".." in traversed.parts
+    with pytest.raises(LocalReadDeniedError):
+        invoke(packet(), (approved[0], OperatorProject(DEVICE, PROJECT, traversed, "Example")))
+
+
+def test_operator_directory_rejects_overlong_components(approved) -> None:
+    folder = approved[1].directory / ("x" * 256)
+    with pytest.raises(LocalReadDeniedError):
+        invoke(packet(), (approved[0], OperatorProject(DEVICE, PROJECT, folder, "Example")))
+
+
 def test_relative_operator_path_denied(approved) -> None:
     with pytest.raises(LocalReadDeniedError):
         invoke(
