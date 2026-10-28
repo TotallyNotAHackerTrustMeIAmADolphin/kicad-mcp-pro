@@ -150,13 +150,11 @@ async def _scenario(
             # A valid remote proof must not reset an expired local approval.
             approval_clock["monotonic_ns"] += 30_000_000_000
             await ws.send('{"kind":"connector.ready","version":1}')
-            pending_close = ws.recv()
-            try:
-                await asyncio.wait_for(pending_close, timeout=3)
-            except ConnectionClosed:
-                pass
-            else:
-                pytest.fail("expired local consent must close the WebSocket")
+            # Build the single awaitable outside the exception assertion so
+            # the raises block contains no nested function calls.
+            pending_close = asyncio.wait_for(ws.recv(), timeout=3)
+            with pytest.raises(ConnectionClosed):
+                await pending_close
             observations.append("denied-before-summary")
             return
         await ws.send('{"kind":"connector.ready","version":1}')
