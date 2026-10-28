@@ -81,15 +81,22 @@ def _open_owner_private_dir(filename: Path) -> int:
 def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
     """Read owner-only PEM by a pinned private directory FD and no-follow basename."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
     getuid = getattr(os, "getuid", None)
-    if os.name != "posix" or not isinstance(nofollow, int) or not callable(getuid):
+    if (
+        os.name != "posix"
+        or type(nofollow) is not int
+        or type(nonblock) is not int
+        or not callable(getuid)
+    ):
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
     directory_fd = _open_owner_private_dir(filename)
     descriptor: int | None = None
     try:
         descriptor = os.open(
             filename.name,
-            os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+            # A substituted FIFO must not block before fstat rejects it.
+            os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0),
             dir_fd=directory_fd,
         )
         metadata = os.fstat(descriptor)
@@ -115,15 +122,17 @@ def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
 def _read_owner_binding(filename: Path) -> dict[str, str]:
     """Read owner-only pairing metadata by a pinned no-follow directory FD."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
+    nonblock = getattr(os, "O_NONBLOCK", None)
     getuid = getattr(os, "getuid", None)
-    if type(nofollow) is not int or not callable(getuid):
+    if type(nofollow) is not int or type(nonblock) is not int or not callable(getuid):
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
     directory_fd = _open_owner_private_dir(filename)
     descriptor: int | None = None
     try:
         descriptor = os.open(
             filename.name + _BINDING_SUFFIX,
-            os.O_RDONLY | nofollow | getattr(os, "O_CLOEXEC", 0),
+            # A substituted FIFO must not block before fstat rejects it.
+            os.O_RDONLY | nofollow | nonblock | getattr(os, "O_CLOEXEC", 0),
             dir_fd=directory_fd,
         )
         metadata = os.fstat(descriptor)

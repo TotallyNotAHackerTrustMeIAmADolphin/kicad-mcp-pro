@@ -118,6 +118,11 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   access. Symlinks and unsupported Windows-native handle semantics **fail
   closed**; Windows support requires its own independently reviewed
   handle/reparse-point implementation.
+- Owner PEM and pairing sidecar reads use pinned no-follow descriptor
+  access with nonblocking opens: substituting a FIFO for either
+  basename cannot hang the CLI before the regular-file/owner/mode
+  checks. The two negative subprocess tests fail closed without any
+  network or production access.
 - Ed25519 device/session signatures use domain-separated Cloud v1 bytes.
   The local client checks hostname and CA before signing; compressed
   WebSocket frames and alternate origins/paths are rejected. Pairing

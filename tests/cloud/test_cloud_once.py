@@ -7,6 +7,8 @@ import asyncio
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -262,6 +264,45 @@ def test_terminal_consent_declined_cannot_access_private_key_or_network(
     )
     assert cloud_once.main(_args(tmp_path, tmp_path / "unavailable.pem")) == 1
     assert "denied" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("target", ["owner-key", "pairing-binding"])
+def test_owner_fifo_substitution_cannot_block_before_inode_validation(
+    tmp_path: Path, target: str
+) -> None:
+    """The inode type check cannot protect an open() blocked on a FIFO."""
+    keyfile = tmp_path / "owner.pem"
+    if target == "owner-key":
+        candidate = keyfile
+        function = "_load_owner_key"
+    else:
+        _keyfile(keyfile)
+        candidate = tmp_path / "owner.pem.cloud-binding-v1.json"
+        candidate.unlink()
+        function = "_read_owner_binding"
+    os.mkfifo(candidate, mode=0o600)
+    code = (
+        "from pathlib import Path\n"
+        "from kicad_mcp import cloud_once\n"
+        "import sys\n"
+        "try:\n"
+        "    getattr(cloud_once, sys.argv[1])(Path(sys.argv[2]))\n"
+        "except cloud_once.LocalApprovalDeniedError:\n"
+        "    print('DENIED')\n"
+        "else:\n"
+        "    print('UNSAFE_ACCEPT')\n"
+    )
+    # A child process allows a strict wall-clock guard on blocking opens
+    # without ever hanging the parent test runner.
+    process = subprocess.run(
+        [sys.executable, "-c", code, function, str(keyfile)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=2.5,
+    )
+    assert process.returncode == 0
+    assert process.stdout.strip() == "DENIED"
 
 
 def test_owner_only_key_is_loaded_but_weak_or_unsafe_key_is_denied(tmp_path: Path) -> None:
