@@ -184,7 +184,6 @@ def _save_owner_binding(filename: Path, *, origin: str, device_id: str, fingerpr
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
     directory_fd = _open_owner_private_dir(filename)
     descriptor: int | None = None
-    created = False
     try:
         # Existing metadata, even with identical contents, cannot represent a
         # new pairing. O_EXCL fails closed instead of reopening by pathname.
@@ -194,16 +193,21 @@ def _save_owner_binding(filename: Path, *, origin: str, device_id: str, fingerpr
             0o600,
             dir_fd=directory_fd,
         )
-        created = True
         body = json.dumps(expected, separators=(",", ":"), sort_keys=True).encode()
-        with os.fdopen(descriptor, "wb") as output:
+        with os.fdopen(descriptor, "wb", buffering=0) as output:
             descriptor = None
-            output.write(body)
-            output.flush()
-            os.fsync(output.fileno())
+            try:
+                if output.write(body) != len(body):
+                    raise OSError(_LOCAL_APPROVAL_DENIED)
+                os.fsync(output.fileno())
+            except BaseException:
+                # Invalidate *our open inode*, not a possibly replaced path.
+                # An incomplete record is never published as trusted pairing.
+                os.ftruncate(output.fileno(), 0)
+                raise
     except (OSError, ValueError, TypeError) as exc:
-        if created:
-            os.unlink(filename.name + _BINDING_SUFFIX, dir_fd=directory_fd)
+        # Never unlink by name after a failed write: another same-user
+        # process could have moved our inode and replaced the path.
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED) from exc
     finally:
         if descriptor is not None:

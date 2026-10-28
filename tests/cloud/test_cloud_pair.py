@@ -122,6 +122,60 @@ def test_existing_device_pin_cannot_be_overwritten_or_repaired_by_reenrollment(
         cloud_pair.enroll("https://localhost", "Fixture", keyfile, lambda *_: None)
 
 
+def test_failed_fsync_never_leaves_a_usable_enrollment_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keyfile = tmp_path / "fresh-owner.pem"
+    cloud_pair._create_private_key(keyfile)
+    fingerprint = hashlib.sha256(
+        _load_owner_key(keyfile)
+        .public_key()
+        .public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    ).hexdigest()
+
+    def fail_sync(_fd: int) -> None:
+        raise OSError("synthetic disk sync failure")
+
+    monkeypatch.setattr(cloud_once.os, "fsync", fail_sync)
+    with pytest.raises(cloud_once.LocalApprovalDeniedError):
+        cloud_pair._save_owner_binding(
+            keyfile, origin="https://localhost", device_id=DEVICE, fingerprint=fingerprint
+        )
+    binding = keyfile.with_name(keyfile.name + ".cloud-binding-v1.json")
+    with pytest.raises(cloud_once.LocalApprovalDeniedError):
+        cloud_once._read_owner_binding(keyfile)
+    assert binding.stat().st_size == 0
+
+
+def test_failed_binding_write_never_unlinks_a_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A same-user pathname swap during fsync must not delete another leaf."""
+    keyfile = tmp_path / "fresh-owner.pem"
+    cloud_pair._create_private_key(keyfile)
+    binding = keyfile.with_name(keyfile.name + ".cloud-binding-v1.json")
+    original = keyfile.with_name(keyfile.name + ".original-record")
+    fingerprint = hashlib.sha256(
+        _load_owner_key(keyfile)
+        .public_key()
+        .public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    ).hexdigest()
+
+    def switch_leaf_then_fail(_fd: int) -> None:
+        binding.rename(original)
+        binding.write_text("replacement made by concurrent owner process")
+        raise OSError("synthetic disk sync failure")
+
+    monkeypatch.setattr(cloud_once.os, "fsync", switch_leaf_then_fail)
+    with pytest.raises(cloud_once.LocalApprovalDeniedError):
+        cloud_pair._save_owner_binding(
+            keyfile, origin="https://localhost", device_id=DEVICE, fingerprint=fingerprint
+        )
+
+    assert original.exists(), "first created inode kept for diagnostics"
+    assert binding.read_text() == "replacement made by concurrent owner process"
+
+
 def test_enrollment_binding_is_strictly_create_only_even_if_identical(tmp_path: Path) -> None:
     """Already existing metadata must never be accepted as a new enrollment."""
     keyfile = tmp_path / "fresh.pem"
