@@ -170,6 +170,41 @@ context, explicit project owner approval, a revocation notice and
 controlled trust-root configuration. Do not enable production flags or
 present this offline test as live KiCad connectivity.
 
+## Opt-in outbound Cloud proof handshake (candidate code, NOT live service)
+
+`cloud_outbound_handshake.py` now provides an **explicitly invoked**,
+import-only TLS/WebSocket **handshake-only** client. The caller must supply
+an independently trusted `https://` origin and its exact matching
+`trusted_origin`, an owner identity, canonical device UUID and in-memory
+Ed25519 signing key. No env-secret lookup, background process, local KiCad
+server, key generation/persistence or pairing is performed by this module.
+
+The client builds only the fixed `/api/v1/connector/ws` path using `wss://`,
+requires a verifiable TLS certificate **and hostname** (custom trust roots
+may be used for enterprise CA or isolated tests, but `CERT_NONE` is
+rejected), disables compression and browser origin/cookies, restricts inbound
+frames to 1 KiB, and limits the total proof exchange to nine seconds.
+After TLS it performs `device.hello`, validates and signs the Cloud v1
+device challenge, validates and signs the connection-bound session
+challenge, then validates `connector.ready`. It **closes the socket
+immediately on success** and returns only a receipt that is **not** an
+authorization to execute, deliver a command or read a project.
+
+`tests/cloud/test_opt_in_outbound_handshake.py` executes this actual
+candidate client with an ephemeral localhost WSS peer and verifies
+certificate/hostname rejection **before sending any proof**; also denies
+wrong device, unexpected message phase/version, invalid/mismatching
+origins, unverified TLS, and malformed owner/device configuration.
+
+The `websockets` dependency is promoted from development-only to runtime
+because this new import-only helper uses it. **No end-user command,
+UI control, timer, daemon, credential file, network service or production
+feature flag is added.** This deliberately does NOT keep a device online:
+real Cloud-to-local read delivery, per-socket authorization, owner OAuth
+login/consent, revoked-device reconnect handling, on-device key custody
+and approved project binding remain separately gated. A synthetic test
+certificate or fixture credentials must never be used with production.
+
 ## Gates before any live connection
 
 1. Complete a separate owner-controlled enrollment and actual OAuth
