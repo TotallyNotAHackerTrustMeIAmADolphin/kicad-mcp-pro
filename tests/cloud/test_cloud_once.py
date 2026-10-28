@@ -130,8 +130,9 @@ def test_terminal_consent_requires_fresh_explicit_challenge(
     cloud_once._confirm_local_read(options)
     terminal = capsys.readouterr().out
     assert repr(str(options.project_directory)) in terminal
-    assert "https://cloud.example" in terminal
-    assert PROJECT in terminal
+    displayed_lines = terminal.splitlines()
+    assert f"Cloud origin: {options.cloud_origin!r}" in displayed_lines
+    assert f"Project UUID: {options.project_id!r}" in displayed_lines
 
 
 def test_terminal_consent_declined_cannot_access_private_key_or_network(
