@@ -39,9 +39,11 @@ from ..utils.dru import (
 from ..utils.schematic_rules import rail_voltage
 from ..validation import drc_runner
 from ..validation.drc_report import (
+    connectivity_evidence_problems,
     courtyard_violations,
     normalize_report_severity,
     report_entries,
+    unconnected_nets,
 )
 from ..validation.policy_state import ValidationPolicyStateService
 from . import validation_policy_state
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
 _PCB_TRANSFER_GATE = "PCB transfer"
 _STACKUP_CONSISTENCY_GATE = "Stackup consistency"
 _WARNING_PREFIX = "WARN: "
+_MAX_UNCONNECTED_NET_LINES = 25
 _ROUTE_CORNER_STYLE_GATE = "Route corner style"
 _FOOTPRINT_PARITY_GATE = "Footprint parity"
 _SCHEMATIC_CONNECTIVITY_GATE = "Schematic connectivity"
@@ -1625,6 +1628,32 @@ def _evaluate_pre_sync_gate() -> GateOutcome:
     )
 
 
+def _unconnected_net_details(unconnected: list[dict[str, object]]) -> list[str]:
+    """Render one actionable ``FAIL:`` line per net that still has open connections."""
+    by_net, unparsed = unconnected_nets(unconnected)
+    ordered = sorted(by_net.items(), key=lambda item: (-len(item[1]), item[0]))
+    details = [f"Unconnected nets: {len(by_net)}"]
+    for name, entries in ordered[:_MAX_UNCONNECTED_NET_LINES]:
+        example = _first_item_description(entries[0])
+        suffix = f"; e.g. {example}" if example else ""
+        details.append(f"FAIL: net {name}: {len(entries)} unconnected connection(s){suffix}")
+    if len(ordered) > _MAX_UNCONNECTED_NET_LINES:
+        remaining = len(ordered) - _MAX_UNCONNECTED_NET_LINES
+        details.append(f"FAIL: {remaining} more net(s) with unconnected connections not listed")
+    if unparsed:
+        details.append(
+            f"FAIL: {unparsed} unconnected item(s) have no parsable net in the DRC report"
+        )
+    return details
+
+
+def _first_item_description(entry: dict[str, object]) -> str:
+    items = entry.get("items")
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        return str(items[0].get("description") or "")
+    return ""
+
+
 def _evaluate_pcb_gate() -> GateOutcome:
     _, report, error = _run_drc_report("pcb_quality_gate.json")
     if report is None:
@@ -1639,14 +1668,25 @@ def _evaluate_pcb_gate() -> GateOutcome:
     courtyard = courtyard_violations(report)
     legacy_only_courtyard = [entry for entry in courtyard if entry not in violations]
     blocking_count = len(violations) + len(unconnected) + len(legacy_only_courtyard)
+    evidence_problems = connectivity_evidence_problems(report)
     status: GateStatus = "PASS" if blocking_count == 0 else "FAIL"
     details = [
         f"DRC violations: {len(violations)}",
         f"Unconnected items: {len(unconnected)}",
+        *_unconnected_net_details(unconnected),
         f"Courtyard issues: {len(courtyard)}",
     ]
     if violations:
         details.append(f"DRC types: {_type_breakdown(violations)}")
+    if evidence_problems:
+        status = "BLOCKED"
+        details.extend(f"BLOCKED: {problem}" for problem in evidence_problems)
+        return GateOutcome(
+            name="PCB",
+            status=status,
+            summary="PCB connectivity could not be verified from the DRC report.",
+            details=details,
+        )
     return GateOutcome(
         name="PCB",
         status=status,
