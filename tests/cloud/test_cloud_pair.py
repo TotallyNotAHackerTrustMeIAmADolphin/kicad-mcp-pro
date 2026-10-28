@@ -363,7 +363,42 @@ def test_owner_key_failed_creation_cleanup_stays_with_pinned_directory(
         cloud_pair._create_private_key(trusted / "owner.pem")
     monkeypatch.setattr(cloud_pair.os, "fsync", original_sync)
     assert protected_decoy.read_bytes() == b"decoy must never be unlinked"
-    assert not (tmp_path / "pinned-trusted" / "owner.pem").exists()
+    assert (tmp_path / "pinned-trusted" / "owner.pem").stat().st_size == 0
+
+
+def test_failed_private_key_write_does_not_delete_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure after another process swaps the key basename must not unlink it."""
+    keyfile = tmp_path / "owner.pem"
+    moved = tmp_path / "old-key-inode.pem"
+
+    def replace_leaf_and_fail(_fd: int) -> None:
+        keyfile.rename(moved)
+        keyfile.write_bytes(b"unrelated same-owner file")
+        raise OSError("simulated key sync failure")
+
+    monkeypatch.setattr(cloud_pair.os, "fsync", replace_leaf_and_fail)
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair._create_private_key(keyfile)
+    assert keyfile.read_bytes() == b"unrelated same-owner file"
+    assert moved.stat().st_size == 0
+
+
+def test_failed_key_sync_does_not_leave_usable_pem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    keyfile = tmp_path / "new-owner.pem"
+
+    def fail_sync(_fd: int) -> None:
+        raise OSError("simulated key sync failure")
+
+    monkeypatch.setattr(cloud_pair.os, "fsync", fail_sync)
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair._create_private_key(keyfile)
+    with pytest.raises(LocalApprovalDeniedError):
+        _load_owner_key(keyfile)
+    assert keyfile.stat().st_size == 0
 
 
 def test_declined_or_tampered_challenge_never_redeems(

@@ -141,16 +141,16 @@ def _create_private_key(path: Path) -> Ed25519PrivateKey:
             0o600,
             dir_fd=directory_fd,
         )
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(data)
-                handle.flush()
+        with os.fdopen(fd, "wb", buffering=0) as handle:
+            try:
+                if handle.write(data) != len(data):
+                    raise OSError(_PAIRING_DENIED)
                 os.fsync(handle.fileno())
-        except BaseException:
-            # Only this invocation's exclusively created leaf is removed.
-            # The pinned directory descriptor prevents symlink/reparent races.
-            os.unlink(path.name, dir_fd=directory_fd)
-            raise
+            except BaseException:
+                # A concurrent same-owner process may replace the filename.
+                # Invalidate only our still-open inode, never unlink by path.
+                os.ftruncate(handle.fileno(), 0)
+                raise
         return key
     except (OSError, ValueError) as exc:
         raise CloudPairingError(_PAIRING_DENIED) from exc
