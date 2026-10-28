@@ -123,6 +123,39 @@ against a live PostgreSQL database, or Cloud-to-KiCad read dispatch.
 **Do not treat a successful fake-server handshake as permission to
 enable production pairing or WebSocket flags.**
 
+## Session-bound, offline-only read dispatch and WebSocket fixture
+
+The local-only `cloud_read_dispatch.py` provides a single-session
+`LocalReadDispatch` for **already independently authorized** local reads.
+It enforces one read at a time, strictly advancing sequence numbers,
+a maximum of 32 reads per session, the existing approved device/project
+file-presence boundary and deadline re-validation **after** inspection.
+It consumes sequences even on denied inspections and permanently fences
+an in-flight result if `close()` races an inspection. The future transport
+MUST call `close()` when a verified socket disconnects, a grant is revoked
+or a session expires. It contains **no live transport, OAuth verifier,
+server credential, owner enrollment, automatic project map, native KiCad
+execution, file content reader or background worker**.
+
+`test_isolated_read_dispatch_websocket.py` connects this dispatcher
+to a **synthetic fake Cloud over localhost-only WSS**, with ephemeral
+Ed25519 device/session signatures and a temporary TLS certificate.
+Its test-only read envelope supplies a fixture sequence; the locally
+trusted test harness supplies the actual authorized sequence and an
+operator-selected project mapping, **never a sequence/authorization
+from the wire itself**. The allowed request returns only three file
+presence booleans. A remote `run_drc` request is rejected and
+the fake WebSocket closes. Read-after-disconnect is denied.
+
+**These are NOT current Cloud protocol frames.** The real Cloud v1
+WebSocket implementation still deliberately rejects all application
+messages after `connector.ready`. Actual authorized Cloud-to-local
+read dispatch requires a separate security-reviewed protocol extension,
+signed server-side PostgreSQL grant verification and immutable socket
+context, explicit project owner approval, a revocation notice and
+controlled trust-root configuration. Do not enable production flags or
+present this offline test as live KiCad connectivity.
+
 ## Gates before any live connection
 
 1. Complete a separate owner-controlled enrollment and actual OAuth
