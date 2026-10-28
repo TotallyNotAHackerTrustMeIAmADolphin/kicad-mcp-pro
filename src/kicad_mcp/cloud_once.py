@@ -160,6 +160,9 @@ async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
         # This is an independent, local, time-limited operator grant, never a
         # Cloud-supplied authorization flag or a synthetic always-true grant.
         cutoff = time.time_ns() // 1_000_000 + 30_000
+        # Wall time remains part of the signed Cloud frame protocol, but the
+        # local owner's 30s lease must not extend if the system clock goes back.
+        monotonic_cutoff = time.monotonic_ns() + 30_000_000_000
         return LocalReadDispatch(
             verified=VerifiedLocalBinding(
                 device_id=receipt.device_id,
@@ -174,7 +177,7 @@ async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
                 directory=options.project_directory,
                 filename_stem=options.filename_stem,
             ),
-            current_authorization=lambda: time.time_ns() // 1_000_000 < cutoff,
+            current_authorization=lambda: time.monotonic_ns() < monotonic_cutoff,
         )
 
     return await execute_single_approved_read(
