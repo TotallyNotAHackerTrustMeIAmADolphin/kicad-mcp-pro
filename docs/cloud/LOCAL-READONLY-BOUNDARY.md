@@ -1,8 +1,9 @@
 # Local KiCad Cloud connector — offline read-only boundary (candidate)
 
 **Status: not connected and not deployed.** This is an isolated, import-only
-policy module (`src/kicad_mcp/cloud_readonly_boundary.py`) for a *future*
-local-device connector. It is not registered in the MCP server, GUI, plugin,
+policy module (`src/kicad_mcp/cloud_readonly_boundary.py`) plus an
+offline-only Ed25519 proof module (`src/kicad_mcp/cloud_device_proofs.py`)
+for a *future* local-device connector. It is not registered in the MCP server, GUI, plugin,
 background service, pairing flow, Cloud WebSocket or the native KiCad engine.
 
 ## Where it fits
@@ -42,6 +43,34 @@ Only `project_summary` is accepted; `run_drc`, `run_erc`, all remote writes,
 native execution and export are denied. If even one security precondition
 fails, the entire request fails closed.
 
+## Offline device cryptography (not enrollment or Cloud authentication)
+
+The Cloud's existing outbound WebSocket protocol asks for two domain-separated
+Ed25519 signatures during handshake:
+
+- `device.challenge` → `device.proof`: sign exactly
+  `kicad-cloud-device-handshake-v1\0{challengeId}\0{deviceId}\0{nonce}`.
+- `connector.session_challenge` → `connector.session_proof`: sign exactly
+  `kicad-cloud-bound-session-v1\0{sessionId}\0{challengeId}\0{deviceId}\0{nonce}\0{binding}`.
+
+The offline proof helpers check canonical UUIDs, base64url 32-byte nonces and
+connection binding, strict JSON field allowlists, device identity and a
+challenge expiry bounded by 60 seconds. They take a **caller-held, in-memory**
+`Ed25519PrivateKey` and emit only a Cloud v1 signature frame. The project
+now explicitly depends on `cryptography` for these helpers. Tests verify
+actual signatures using independent public-key verification and test that
+tampering with device/session/connection identity invalidates a signature;
+signing never writes or persists a private key.
+
+**This is not Cloud server authentication:** an attacker-controlled service
+could still submit a syntactically valid challenge. A future transport MUST
+verify the Cloud TLS host/certificate and endpoint identity *before* signing,
+maintain per-connection proof state to prevent cross-socket challenge reuse,
+handle key storage/revocation in an approved keystore, and independently verify
+owner OAuth authorization and active project/client grants. No transport,
+device enrollment, key persistence, background service or production use is
+implemented here.
+
 ## Local review / fixture tests
 
 On a trusted development checkout, run:
@@ -50,7 +79,8 @@ On a trusted development checkout, run:
 PYTHONPATH=src python3 -m pytest -q tests/cloud/
 ```
 
-The tests include the checked-in KiCad 10 demo schematic and PCB, as well as
+The tests include cryptographic Ed25519 challenge proof roundtrips with
+ephemeral keys, the checked-in KiCad 10 demo schematic and PCB, as well as
 malformed, duplicate-field, cross-device, cross-project, symlink, directory
 replacement, session lease/deadline, forbidden operation and content-leakage denials.
 
