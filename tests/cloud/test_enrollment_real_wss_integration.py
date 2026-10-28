@@ -20,6 +20,7 @@ import pytest
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from test_isolated_tls_websocket_handshake import _synthetic_tls
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.exceptions import ConnectionClosed
 
 from kicad_mcp import cloud_once, cloud_pair
 from kicad_mcp.cloud_outbound_handshake import execute_single_approved_read
@@ -44,7 +45,9 @@ def _signature(message: dict[str, object]) -> bytes:
     return base64.urlsafe_b64decode(value + "==")
 
 
-async def _scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+async def _scenario(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, expire_during_proof: bool = False
+) -> list[str]:
     server_tls, ca_pem = _synthetic_tls(tmp_path)
     observations: list[str] = []
     keyfile = tmp_path / "enrolled.pem"
@@ -52,6 +55,13 @@ async def _scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str
     project_dir.mkdir()
     (project_dir / "demo.kicad_pro").write_text("private fixture file")
     accepted_public_key = None
+    approval_clock = {"monotonic_ns": time.monotonic_ns()}
+    if expire_during_proof:
+        monkeypatch.setattr(
+            cloud_once.time,
+            "monotonic_ns",
+            lambda: approval_clock["monotonic_ns"],
+        )
 
     async def ws_peer(ws: ServerConnection) -> None:
         hello = json.loads(await ws.recv())
@@ -116,6 +126,14 @@ async def _scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str
             + BINDING.encode(),
         )
         observations.append("session-proof")
+        if expire_during_proof:
+            # A valid remote proof must not reset an expired local approval.
+            approval_clock["monotonic_ns"] += 30_000_000_000
+            await ws.send('{"kind":"connector.ready","version":1}')
+            with pytest.raises(ConnectionClosed):
+                await asyncio.wait_for(ws.recv(), timeout=3)
+            observations.append("denied-before-summary")
+            return
         await ws.send('{"kind":"connector.ready","version":1}')
         await ws.send(
             json.dumps(
@@ -242,7 +260,8 @@ async def _scenario(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[str
             str(keyfile),
             "--allow-once",
         ]
-        assert await asyncio.to_thread(cloud_once.main, args) == 0
+        exit_status = await asyncio.to_thread(cloud_once.main, args)
+        assert exit_status == (1 if expire_during_proof else 0)
 
     return observations
 
@@ -258,4 +277,18 @@ def test_browser_enrollment_then_real_tls_wss_single_summary(
         "device-proof",
         "session-proof",
         "metadata-only",
+    ]
+
+
+def test_real_tls_wss_expired_foreground_consent_never_sends_project_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert asyncio.run(_scenario(tmp_path, monkeypatch, expire_during_proof=True)) == [
+        "pairing-challenge",
+        "browser-approved",
+        "pairing-redeemed",
+        "device-hello",
+        "device-proof",
+        "session-proof",
+        "denied-before-summary",
     ]

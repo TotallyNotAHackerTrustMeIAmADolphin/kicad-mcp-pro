@@ -153,6 +153,14 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   finishes. Immutable wall-clock and monotonic deadlines are passed to the
   connect path and checked before key use, again at handshake completion,
   and for each one-time read. Delayed handshakes cannot renew consent.
+- The **real temporary localhost TLS/WSS** owner-enrollment integration
+  fixture now also simulates that 30-second expiration *between* verified
+  device/session Ed25519 proofs and the Cloud `connector.ready` frame. It
+  asserts the local client denies the exchange and closes its socket
+  **before any `connector.read_result`**, while the successful single-summary
+  and read-ACK scenario remains green. This is a synthetic test clock and
+  synthetic owner browser, **not** actual OAuth acceptance.
+
 - The local `tests/cloud/` suite is included in the full Python CI runner.
   For proportionate local validation, run
   `uv run --all-extras pytest -q tests/cloud/` and check the latest exact
