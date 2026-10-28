@@ -24,6 +24,7 @@ from websockets.exceptions import ConnectionClosed
 
 from kicad_mcp import cloud_once, cloud_pair
 from kicad_mcp.cloud_outbound_handshake import execute_single_approved_read
+from kicad_mcp.cloud_read_dispatch import LocalReadDispatch
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Owner-only key binding is POSIX-only")
 
@@ -46,7 +47,11 @@ def _signature(message: dict[str, object]) -> bytes:
 
 
 async def _scenario(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, expire_during_proof: bool = False
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    expire_during_proof: bool = False,
+    expire_after_inspection: bool = False,
 ) -> list[str]:
     server_tls, ca_pem = _synthetic_tls(tmp_path)
     observations: list[str] = []
@@ -56,12 +61,25 @@ async def _scenario(
     (project_dir / "demo.kicad_pro").write_text("private fixture file")
     accepted_public_key = None
     approval_clock = {"monotonic_ns": time.monotonic_ns()}
-    if expire_during_proof:
+    if expire_during_proof or expire_after_inspection:
         monkeypatch.setattr(
             cloud_once.time,
             "monotonic_ns",
             lambda: approval_clock["monotonic_ns"],
         )
+    if expire_after_inspection:
+        ordinary_read = LocalReadDispatch.read
+
+        def expire_after_finished_read(
+            dispatcher: LocalReadDispatch, frame: bytes, *, sequence: int
+        ) -> dict[str, object]:
+            result = ordinary_read(dispatcher, frame, sequence=sequence)
+            # This runs after read()'s final authorization but before
+            # asyncio.to_thread yields the result to the WSS sender.
+            approval_clock["monotonic_ns"] += 30_000_000_000
+            return result
+
+        monkeypatch.setattr(LocalReadDispatch, "read", expire_after_finished_read)
 
     async def ws_peer(ws: ServerConnection) -> None:
         hello = json.loads(await ws.recv())
@@ -153,6 +171,13 @@ async def _scenario(
                 }
             )
         )
+        if expire_after_inspection:
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=3)
+                observations.append("unexpected-metadata-delivery")
+            except ConnectionClosed:
+                observations.append("denied-before-delivery")
+            return
         result = json.loads(await ws.recv())
         assert result["kind"] == "connector.read_result"
         assert result["result"]["requestId"] == REQUEST
@@ -261,7 +286,7 @@ async def _scenario(
             "--allow-once",
         ]
         exit_status = await asyncio.to_thread(cloud_once.main, args)
-        assert exit_status == (1 if expire_during_proof else 0)
+        assert exit_status == (1 if expire_during_proof or expire_after_inspection else 0)
 
     return observations
 
@@ -291,4 +316,18 @@ def test_real_tls_wss_expired_foreground_consent_never_sends_project_summary(
         "device-proof",
         "session-proof",
         "denied-before-summary",
+    ]
+
+
+def test_real_tls_wss_expiry_between_read_and_delivery_denies_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert asyncio.run(_scenario(tmp_path, monkeypatch, expire_after_inspection=True)) == [
+        "pairing-challenge",
+        "browser-approved",
+        "pairing-redeemed",
+        "device-hello",
+        "device-proof",
+        "session-proof",
+        "denied-before-delivery",
     ]

@@ -161,6 +161,16 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   and read-ACK scenario remains green. This is a synthetic test clock and
   synthetic owner browser, **not** actual OAuth acceptance.
 
+- The one-shot transport additionally revalidates the **actual original
+  authorized read frame** after the metadata inspection worker finishes
+  and before it sends `connector.read_result` over WSS. The current local
+  grant/consent, request deadline, device/session identity and inspected
+  request ID must still match. A regression with real temporary localhost
+  TLS/WebSocket advances the consent clock **after the worker returns**,
+  confirming no metadata response leaves the client; a separate
+  dispatcher test checks a revoked grant and expired signed deadline.
+  The send remains asynchronous, so independent Cloud-side delivery
+  authorization and revocation checks are required.
 - The local `tests/cloud/` suite is included in the full Python CI runner.
   For proportionate local validation, run
   `uv run --all-extras pytest -q tests/cloud/` and check the latest exact

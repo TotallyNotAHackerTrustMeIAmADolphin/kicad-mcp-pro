@@ -78,6 +78,22 @@ class LocalReadDispatch:
             ):
                 raise LocalReadDeniedError(_READ_DENIED)
 
+    def assert_delivery_authorized(self, frame: bytes, *, device_id: str, session_id: str) -> None:
+        """Revalidate the local grant and request deadline just before WSS delivery.
+
+        Passing read() is not permission to send later: the operator grant,
+        signed request deadline, and active session can change while the
+        async transport waits for its worker thread to return.
+        """
+        self.assert_transport_session(device_id=device_id, session_id=session_id)
+        self._authorize_now()
+        body = _validate_frame(frame, self._verified, self._project, self._clock_ms())
+        with self._lock:
+            if self._closed or self._busy or body["requestId"] not in self._seen_request_ids:
+                raise LocalReadDeniedError(_READ_DENIED)
+        self._authorize_now()
+        self.assert_transport_session(device_id=device_id, session_id=session_id)
+
     def close(self) -> None:
         """Invalidate this session, including any pending read response."""
         with self._lock:

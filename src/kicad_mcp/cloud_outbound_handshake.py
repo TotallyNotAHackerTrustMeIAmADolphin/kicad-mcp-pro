@@ -128,7 +128,12 @@ async def _complete_authorized_read(
         response = await asyncio.to_thread(
             dispatcher.read, request_bytes, sequence=envelope["sequence"]
         )
-        dispatcher.assert_transport_session(device_id=device_id, session_id=session_id)
+        # Worker completion is not a delivery capability. The foreground
+        # consent/grant and exact signed frame deadline may have expired
+        # between read() returning and this WebSocket send.
+        dispatcher.assert_delivery_authorized(
+            request_bytes, device_id=device_id, session_id=session_id
+        )
         await socket.send(
             json.dumps(
                 {

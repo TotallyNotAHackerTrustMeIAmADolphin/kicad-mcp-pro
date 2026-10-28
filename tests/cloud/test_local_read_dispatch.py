@@ -312,6 +312,26 @@ def test_revoke_while_inspecting_drops_metadata_even_if_socket_stays_open(
     assert isinstance(denied[0], LocalReadDeniedError)
 
 
+def test_result_delivery_rechecks_grant_and_request_deadline(
+    subject: LocalReadDispatch,
+) -> None:
+    """A once-valid read must not become a delivery capability after expiry."""
+    active = {"grant": True, "now": NOW}
+    with (
+        patch.object(subject, "_current_authorization", side_effect=lambda: active["grant"]),
+        patch.object(subject, "_clock_ms", side_effect=lambda: active["now"]),
+    ):
+        response = subject.read(packet(), sequence=1)
+        assert response["requestId"] == REQUEST
+        active["grant"] = False
+        with pytest.raises(LocalReadDeniedError):
+            subject.assert_delivery_authorized(packet(), device_id=DEVICE, session_id=SESSION)
+        active["grant"] = True
+        active["now"] = NOW + 1_001
+        with pytest.raises(LocalReadDeniedError):
+            subject.assert_delivery_authorized(packet(), device_id=DEVICE, session_id=SESSION)
+
+
 def test_revoke_after_inspection_but_before_reply_denies(
     subject: LocalReadDispatch,
 ) -> None:
