@@ -35,7 +35,8 @@ class LocalApprovalDeniedError(ValueError):
 def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
     """Read a regular owner-only PEM through a non-following file descriptor."""
     nofollow = getattr(os, "O_NOFOLLOW", None)
-    if os.name != "posix" or not isinstance(nofollow, int):
+    getuid = getattr(os, "getuid", None)
+    if os.name != "posix" or not isinstance(nofollow, int) or not callable(getuid):
         raise LocalApprovalDeniedError("local approval denied")
     descriptor: int | None = None
     try:
@@ -43,7 +44,7 @@ def _load_owner_key(filename: Path) -> Ed25519PrivateKey:
         metadata = os.fstat(descriptor)
         if (
             not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_uid != os.getuid()
+            or metadata.st_uid != getuid()
             or metadata.st_mode & 0o077
             or not 1 <= metadata.st_size <= 8192
         ):
