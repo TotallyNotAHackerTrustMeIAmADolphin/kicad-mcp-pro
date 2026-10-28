@@ -186,17 +186,14 @@ def _save_owner_binding(filename: Path, *, origin: str, device_id: str, fingerpr
     descriptor: int | None = None
     created = False
     try:
-        try:
-            descriptor = os.open(
-                filename.name + _BINDING_SUFFIX,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | getattr(os, "O_CLOEXEC", 0),
-                0o600,
-                dir_fd=directory_fd,
-            )
-        except FileExistsError:
-            if _read_owner_binding(filename) != expected:
-                raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED) from None
-            return
+        # Existing metadata, even with identical contents, cannot represent a
+        # new pairing. O_EXCL fails closed instead of reopening by pathname.
+        descriptor = os.open(
+            filename.name + _BINDING_SUFFIX,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
         created = True
         body = json.dumps(expected, separators=(",", ":"), sort_keys=True).encode()
         with os.fdopen(descriptor, "wb") as output:

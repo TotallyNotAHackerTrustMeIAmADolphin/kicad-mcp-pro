@@ -122,6 +122,27 @@ def test_existing_device_pin_cannot_be_overwritten_or_repaired_by_reenrollment(
         cloud_pair.enroll("https://localhost", "Fixture", keyfile, lambda *_: None)
 
 
+def test_enrollment_binding_is_strictly_create_only_even_if_identical(tmp_path: Path) -> None:
+    """Already existing metadata must never be accepted as a new enrollment."""
+    keyfile = tmp_path / "fresh.pem"
+    cloud_pair._create_private_key(keyfile)
+    fingerprint = hashlib.sha256(
+        _load_owner_key(keyfile)
+        .public_key()
+        .public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    ).hexdigest()
+    cloud_pair._save_owner_binding(
+        keyfile, origin="https://localhost", device_id=DEVICE, fingerprint=fingerprint
+    )
+    binding = keyfile.with_name(keyfile.name + ".cloud-binding-v1.json")
+    before = binding.read_bytes()
+    with pytest.raises(cloud_once.LocalApprovalDeniedError):
+        cloud_pair._save_owner_binding(
+            keyfile, origin="https://localhost", device_id=DEVICE, fingerprint=fingerprint
+        )
+    assert binding.read_bytes() == before
+
+
 def test_invalid_origin_never_creates_a_key(tmp_path: Path) -> None:
     for origin in [
         "http://localhost",
