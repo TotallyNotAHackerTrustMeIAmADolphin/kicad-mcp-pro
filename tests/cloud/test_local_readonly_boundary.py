@@ -217,6 +217,23 @@ def test_operator_directory_rejects_overlong_components(approved) -> None:
         invoke(packet(), (approved[0], OperatorProject(DEVICE, PROJECT, folder, "Example")))
 
 
+def test_operator_directory_walker_rejects_relative_input_directly() -> None:
+    # The public read entrypoint already requires absolute paths. Exercise the
+    # directory-FD helper's independent guard so future callers stay safe.
+    from kicad_mcp.cloud_readonly_boundary import _open_operator_directory
+
+    with pytest.raises(LocalReadDeniedError):
+        _open_operator_directory(Path("relative"))
+    with pytest.raises(LocalReadDeniedError):
+        _open_operator_directory(None)  # type: ignore[arg-type]
+
+
+def test_operator_directory_rejects_excessive_depth(approved) -> None:
+    folder = approved[1].directory.joinpath(*(["subdir"] * 129))
+    with pytest.raises(LocalReadDeniedError):
+        invoke(packet(), (approved[0], OperatorProject(DEVICE, PROJECT, folder, "Example")))
+
+
 def test_relative_operator_path_denied(approved) -> None:
     with pytest.raises(LocalReadDeniedError):
         invoke(
