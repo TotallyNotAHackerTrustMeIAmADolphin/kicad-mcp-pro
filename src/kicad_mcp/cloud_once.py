@@ -249,7 +249,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _confirm_local_read(options: argparse.Namespace) -> None:
+def _confirm_local_read(options: argparse.Namespace) -> tuple[int, int]:
     """Require a deliberate foreground terminal acknowledgement before key use.
 
     This blocks unattended shell redirection, not a malicious process with its
@@ -274,10 +274,20 @@ def _confirm_local_read(options: argparse.Namespace) -> None:
     answer = input(f"Type APPROVE {challenge} to authorize exactly one read: ")
     if answer != f"APPROVE {challenge}":
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
+    # Start both deadlines at the actual foreground approval, never after
+    # a potentially slow remote device/session handshake.
+    return time.time_ns() // 1_000_000 + 30_000, time.monotonic_ns() + 30_000_000_000
 
 
-async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
-    if not options.allow_once or not options.project_directory.is_absolute():
+async def _connect(
+    options: argparse.Namespace, authorization_window: tuple[int, int]
+) -> HandshakeReceipt:
+    wall_cutoff_ms, monotonic_cutoff_ns = authorization_window
+    if (
+        not options.allow_once
+        or not options.project_directory.is_absolute()
+        or time.monotonic_ns() >= monotonic_cutoff_ns
+    ):
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
     signing_key = _load_bound_owner_key(
         options.private_key_file, options.cloud_origin, options.device_id
@@ -286,17 +296,16 @@ async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
     def approved_local_project(receipt: HandshakeReceipt) -> LocalReadDispatch:
         # This is an independent, local, time-limited operator grant, never a
         # Cloud-supplied authorization flag or a synthetic always-true grant.
-        cutoff = time.time_ns() // 1_000_000 + 30_000
-        # Wall time remains part of the signed Cloud frame protocol, but the
-        # local owner's 30s lease must not extend if the system clock goes back.
-        monotonic_cutoff = time.monotonic_ns() + 30_000_000_000
+        # Even a valid device handshake must not renew expired local consent.
+        if time.monotonic_ns() >= monotonic_cutoff_ns:
+            raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
         return LocalReadDispatch(
             verified=VerifiedLocalBinding(
                 device_id=receipt.device_id,
                 project_id=options.project_id,
                 operations=frozenset({"project_summary"}),
                 session_id=receipt.session_id,
-                session_expires_unix_ms=cutoff,
+                session_expires_unix_ms=wall_cutoff_ms,
             ),
             operator_project=OperatorProject(
                 device_id=options.device_id,
@@ -304,7 +313,7 @@ async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
                 directory=options.project_directory,
                 filename_stem=options.filename_stem,
             ),
-            current_authorization=lambda: time.monotonic_ns() < monotonic_cutoff,
+            current_authorization=lambda: time.monotonic_ns() < monotonic_cutoff_ns,
             max_reads=1,
         )
 
@@ -321,8 +330,8 @@ async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
 def main(argv: list[str] | None = None) -> int:
     options = _parser().parse_args(argv)
     try:
-        _confirm_local_read(options)
-        asyncio.run(_connect(options))
+        approval_window = _confirm_local_read(options)
+        asyncio.run(_connect(options, approval_window))
     except (ValueError, OSError, EOFError, KeyboardInterrupt):
         print("Local Cloud connection denied", file=sys.stderr)
         return 1

@@ -148,6 +148,11 @@ fields. Failure is a generic denial; no remote fallback tool is offered.
   local-only transport stub, the actual outbound WSS client and read
   dispatcher execute; unlike a real owner acceptance, it exercises **no
   signed-in OAuth user, production Cloud server, or production data**.
+- The 30-second local owner authorization window starts **immediately after
+  the foreground confirmation**, not when the Cloud TLS/WebSocket proof
+  finishes. Immutable wall-clock and monotonic deadlines are passed to the
+  connect path and checked before key use, again at handshake completion,
+  and for each one-time read. Delayed handshakes cannot renew consent.
 - The local `tests/cloud/` suite is included in the full Python CI runner.
   For proportionate local validation, run
   `uv run --all-extras pytest -q tests/cloud/` and check the latest exact

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -383,6 +384,53 @@ def test_local_lease_expires_on_monotonic_clock_even_if_wall_clock_rolled_back(
     monkeypatch.setattr("builtins.input", lambda *_: "APPROVE CAFEBABE")
     monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
     assert cloud_once.main(_args(folder, keyfile)) == 0
+
+
+def test_grant_clock_starts_when_local_foreground_consent_is_returned(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = cloud_once._parser().parse_args(_args(tmp_path, tmp_path / "not-opened.pem"))
+    clocks = {"wall_ns": 1_800_000_000_000_000_000, "monotonic_ns": 100_000_000_000}
+    monkeypatch.setattr(cloud_once.time, "time_ns", lambda: clocks["wall_ns"])
+    monkeypatch.setattr(cloud_once.time, "monotonic_ns", lambda: clocks["monotonic_ns"])
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
+
+    def finish_user_consent(_prompt: str) -> str:
+        clocks["wall_ns"] += 7_000_000_000
+        clocks["monotonic_ns"] += 7_000_000_000
+        return "APPROVE CAFEBABE"
+
+    monkeypatch.setattr("builtins.input", finish_user_consent)
+    wall_cutoff, monotonic_cutoff = cloud_once._confirm_local_read(options)
+    assert wall_cutoff == clocks["wall_ns"] // 1_000_000 + 30_000
+    assert monotonic_cutoff == clocks["monotonic_ns"] + 30_000_000_000
+
+
+def test_slow_handshake_cannot_renew_the_original_local_lease(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    folder = tmp_path / "approved"
+    folder.mkdir()
+    keyfile = _keyfile(tmp_path / "owner.pem")
+    options = cloud_once._parser().parse_args(_args(folder, keyfile))
+    clocks = {"monotonic": 100_000_000_000}
+    monkeypatch.setattr(cloud_once.time, "monotonic_ns", lambda: clocks["monotonic"])
+    original_window = (1_800_000_030_000, clocks["monotonic"] + 30_000_000_000)
+
+    async def slow_cloud(**kwargs: object) -> HandshakeReceipt:
+        factory = kwargs["dispatcher_factory"]
+        assert callable(factory)
+        clocks["monotonic"] += 30_000_000_000
+        receipt = HandshakeReceipt(DEVICE, SESSION)
+        factory(receipt)
+        return receipt
+
+    monkeypatch.setattr(cloud_once, "execute_single_approved_read", slow_cloud)
+    connection = cloud_once._connect(options, original_window)
+    with pytest.raises(cloud_once.LocalApprovalDeniedError):
+        asyncio.run(connection)
 
 
 def test_one_shot_cli_grant_rejects_second_read_even_when_lease_valid(
