@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import time
@@ -59,6 +60,97 @@ def test_no_consent_flag_never_loads_a_key_or_connects(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as denied:
         cloud_once.main(_raise_argument_1)
     assert denied.value.code == 2
+
+
+def test_terminal_consent_rejects_noninteractive_or_declined_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    options = argparse.Namespace(
+        cloud_origin="https://cloud.example",
+        project_id=PROJECT,
+        project_directory=tmp_path,
+        filename_stem="demo",
+    )
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("no prompt for piped commands"))
+    with pytest.raises(cloud_once.LocalApprovalDeniedError):
+        cloud_once._confirm_local_read(options)
+
+
+def test_piped_cli_denied_before_private_key_or_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda *_: pytest.fail("must not prompt"))
+    monkeypatch.setattr(
+        cloud_once, "_load_owner_key", lambda *_: pytest.fail("denied before private key read")
+    )
+    monkeypatch.setattr(
+        cloud_once,
+        "execute_single_approved_read",
+        lambda **_: pytest.fail("denied before any outbound connection"),
+    )
+    assert cloud_once.main(_args(tmp_path, tmp_path / "unavailable.pem")) == 1
+    assert "denied" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("reason", [EOFError, KeyboardInterrupt])
+def test_aborted_terminal_confirmation_never_reads_owner_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reason: type[BaseException],
+) -> None:
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda *_: (_ for _ in ()).throw(reason()))
+    monkeypatch.setattr(
+        cloud_once, "_load_owner_key", lambda *_: pytest.fail("key must stay unopened")
+    )
+    assert cloud_once.main(_args(tmp_path, tmp_path / "missing.pem")) == 1
+
+
+def test_terminal_consent_requires_fresh_explicit_challenge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    options = argparse.Namespace(
+        cloud_origin="https://cloud.example",
+        project_id=PROJECT,
+        project_directory=tmp_path,
+        filename_stem="demo",
+    )
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
+    responses = iter(["APPROVE expired", "APPROVE CAFEBABE"])
+    monkeypatch.setattr("builtins.input", lambda *_: next(responses))
+    with pytest.raises(cloud_once.LocalApprovalDeniedError):
+        cloud_once._confirm_local_read(options)
+    cloud_once._confirm_local_read(options)
+    terminal = capsys.readouterr().out
+    assert repr(str(options.project_directory)) in terminal
+    assert "https://cloud.example" in terminal
+    assert PROJECT in terminal
+
+
+def test_terminal_consent_declined_cannot_access_private_key_or_network(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "1234abcd")
+    monkeypatch.setattr("builtins.input", lambda *_: "APPROVE wrong")
+    monkeypatch.setattr(
+        cloud_once, "_load_owner_key", lambda *_: pytest.fail("denied before key read")
+    )
+    monkeypatch.setattr(
+        cloud_once,
+        "execute_single_approved_read",
+        lambda **_: pytest.fail("denied before network"),
+    )
+    assert cloud_once.main(_args(tmp_path, tmp_path / "unavailable.pem")) == 1
+    assert "denied" in capsys.readouterr().err
 
 
 def test_owner_only_key_is_loaded_but_weak_or_unsafe_key_is_denied(tmp_path: Path) -> None:
@@ -121,6 +213,10 @@ def test_explicit_approval_uses_only_selected_project_and_file_presence(
         return receipt
 
     monkeypatch.setattr(cloud_once, "execute_single_approved_read", fake_cloud)
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
+    monkeypatch.setattr("builtins.input", lambda *_: "APPROVE CAFEBABE")
     assert cloud_once.main(_args(folder, keyfile)) == 0
     assert observations
     assert '"projectPresent": true' in observations[0]
@@ -138,6 +234,10 @@ def test_invalid_local_grant_or_denied_server_fails_closed(
         raise AssertionError("never start TLS without a selected absolute folder")
 
     monkeypatch.setattr(cloud_once, "execute_single_approved_read", no_network)
+    monkeypatch.setattr(cloud_once.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(cloud_once.secrets, "token_hex", lambda _: "cafebabe")
+    monkeypatch.setattr("builtins.input", lambda *_: "APPROVE CAFEBABE")
     assert cloud_once.main(_args(Path("relative"), keyfile)) == 1
     assert "denied" in capsys.readouterr().err
 

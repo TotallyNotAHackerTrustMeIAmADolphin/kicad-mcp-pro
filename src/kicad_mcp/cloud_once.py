@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import os
 import re
+import secrets
 import stat
 import sys
 import time
@@ -126,6 +127,30 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _confirm_local_read(options: argparse.Namespace) -> None:
+    """Require a deliberate foreground terminal acknowledgement before key use.
+
+    This blocks unattended shell redirection, not a malicious process with its
+    own PTY or the same OS account. Real user identity still needs trusted UI.
+    """
+    if (
+        not sys.stdin.isatty()
+        or not sys.stdout.isatty()
+        or not isinstance(options.project_directory, Path)
+        or not options.project_directory.is_absolute()
+    ):
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
+    challenge = secrets.token_hex(4).upper()
+    print("One-time metadata-only KiCad Cloud read (no project contents).")
+    print(f"Cloud origin: {options.cloud_origin!r}")
+    print(f"Project UUID: {options.project_id!r}")
+    print(f"Local directory: {str(options.project_directory)!r}")
+    print(f"Local project stem: {options.filename_stem!r}")
+    answer = input(f"Type APPROVE {challenge} to authorize exactly one read: ")
+    if answer != f"APPROVE {challenge}":
+        raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
+
+
 async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
     if not options.allow_once or not options.project_directory.is_absolute():
         raise LocalApprovalDeniedError(_LOCAL_APPROVAL_DENIED)
@@ -165,8 +190,9 @@ async def _connect(options: argparse.Namespace) -> HandshakeReceipt:
 def main(argv: list[str] | None = None) -> int:
     options = _parser().parse_args(argv)
     try:
+        _confirm_local_read(options)
         asyncio.run(_connect(options))
-    except (ValueError, OSError):
+    except (ValueError, OSError, EOFError, KeyboardInterrupt):
         print("Local Cloud connection denied", file=sys.stderr)
         return 1
     print("One authorized project-presence request completed")
