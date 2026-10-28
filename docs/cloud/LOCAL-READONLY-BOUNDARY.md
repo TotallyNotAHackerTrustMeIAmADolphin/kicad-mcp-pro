@@ -25,8 +25,9 @@ stem. The Cloud cannot choose or receive a local filesystem path.
 
 `inspect_readonly()` accepts one **strict 1 KiB v1 frame**, authenticates
 nothing itself, rechecks both identity IDs and the operation against the
-trusted binding and operator policy, rejects stale/future deadlines beyond
-30 seconds, and checks only the existence of exactly three direct files:
+trusted binding and operator policy, requires a valid opaque session UUID
+and a trusted lease expiring within at most five minutes, rejects expired
+leases and read deadlines beyond that lease or 30 seconds, and checks only the existence of exactly three direct files:
 `*.kicad_pro`, `*.kicad_pcb` and `*.kicad_sch`. It follows no symlinks, uses
 component-by-component `openat(O_NOFOLLOW | O_DIRECTORY)` for the folder,
 and `stat(..., follow_symlinks=False)` relative to the opened descriptor.
@@ -46,14 +47,24 @@ fails, the entire request fails closed.
 On a trusted development checkout, run:
 
 ```sh
-PYTHONPATH=src python3 -m pytest -q tests/cloud/test_local_readonly_boundary.py
+PYTHONPATH=src python3 -m pytest -q tests/cloud/
 ```
 
 The tests include the checked-in KiCad 10 demo schematic and PCB, as well as
 malformed, duplicate-field, cross-device, cross-project, symlink, directory
-replacement, deadline, forbidden operation and content-leakage denials.
-They do not contact Cloud, start KiCad, mutate an owner's design, send keys
-over the network or require a production account.
+replacement, session lease/deadline, forbidden operation and content-leakage denials.
+
+`tests/cloud/test_isolated_authorization_lifecycle.py` additionally uses a
+**synthetic mutable grant/session state** to exercise current client/project
+permission intersection, revocation between requests, disconnect, duplicate
+sequence, wrong owner/client/device/session and a device lease that expires
+before a queued read. This is an **offline fixture**, not a cryptographic
+device authentication test, real OAuth verifier, live PostgreSQL-backed Cloud
+read gate, Cloud-to-local dispatcher or actual owner project grant. Fixture
+state deliberately models the Cloud side only; it cannot be used as a
+production authority or session credential. Source and test code never
+contact Cloud, start KiCad, mutate an owner's design, send keys over the
+network or require a production account.
 
 ## Gates before any live connection
 

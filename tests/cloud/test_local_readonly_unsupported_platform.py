@@ -19,6 +19,7 @@ from kicad_mcp.cloud_readonly_boundary import (
 DEVICE = "11111111-1111-4111-8111-111111111111"
 PROJECT = "22222222-2222-4222-8222-222222222222"
 NOW = 1_800_000_000_000
+SESSION = "44444444-4444-4444-8444-444444444444"
 
 
 def test_missing_nofollow_flag_rejected_even_for_valid_request(tmp_path: Path) -> None:
@@ -41,7 +42,9 @@ def test_missing_nofollow_flag_rejected_even_for_valid_request(tmp_path: Path) -
         with pytest.raises(LocalReadDeniedError):
             inspect_readonly(
                 frame,
-                verified=VerifiedLocalBinding(DEVICE, PROJECT, frozenset({"project_summary"})),
+                verified=VerifiedLocalBinding(
+                    DEVICE, PROJECT, frozenset({"project_summary"}), SESSION, NOW + 60_000
+                ),
                 operator_project=OperatorProject(DEVICE, PROJECT, folder, "sample"),
                 now_unix_ms=NOW,
             )

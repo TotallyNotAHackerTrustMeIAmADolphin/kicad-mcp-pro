@@ -17,6 +17,7 @@ from pathlib import Path
 
 MAX_FRAME_BYTES = 1024
 MAX_DEADLINE_MS = 30_000
+MAX_SESSION_REMAINING_MS = 300_000
 MAX_DIRECTORY_ENTRIES = 128
 _UUID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
@@ -41,6 +42,8 @@ class VerifiedLocalBinding:
     device_id: str
     project_id: str
     operations: frozenset[str]
+    session_id: str
+    session_expires_unix_ms: int
 
 
 @dataclass(frozen=True)
@@ -98,11 +101,16 @@ def _validate_frame(
         or body.get("projectId") != boundary.project_id
         or boundary.device_id != policy.device_id
         or boundary.project_id != policy.project_id
+        or not _uuid(boundary.session_id)
+        or type(boundary.session_expires_unix_ms) is not int
+        or not (now_ms < boundary.session_expires_unix_ms <= now_ms + MAX_SESSION_REMAINING_MS)
         or not isinstance(operation, str)
         or operation not in _SUPPORTED
         or operation not in boundary.operations
         or type(deadline) is not int
-        or not (now_ms < deadline <= now_ms + MAX_DEADLINE_MS)
+        or not (
+            now_ms < deadline <= min(now_ms + MAX_DEADLINE_MS, boundary.session_expires_unix_ms)
+        )
     ):
         raise LocalReadDeniedError("request denied")
     return body

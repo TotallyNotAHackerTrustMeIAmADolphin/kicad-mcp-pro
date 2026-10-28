@@ -25,6 +25,17 @@ DEVICE = "11111111-1111-4111-8111-111111111111"
 PROJECT = "22222222-2222-4222-8222-222222222222"
 REQUEST = "33333333-3333-4333-8333-333333333333"
 NOW = 1_800_000_000_000
+SESSION = "44444444-4444-4444-8444-444444444444"
+
+
+def bound(
+    device: str = DEVICE,
+    project: str = PROJECT,
+    operations: frozenset[str] = frozenset({"project_summary"}),
+    session: str = SESSION,
+    expires: int = NOW + 60_000,
+) -> VerifiedLocalBinding:
+    return VerifiedLocalBinding(device, project, operations, session, expires)
 
 
 @pytest.fixture
@@ -34,7 +45,7 @@ def approved(tmp_path: Path) -> tuple[VerifiedLocalBinding, OperatorProject]:
     for ext in (".kicad_pro", ".kicad_pcb", ".kicad_sch"):
         (folder / ("Example" + ext)).write_text("confidential content", encoding="utf-8")
     return (
-        VerifiedLocalBinding(DEVICE, PROJECT, frozenset({"project_summary"})),
+        bound(),
         OperatorProject(DEVICE, PROJECT, folder, "Example"),
     )
 
@@ -120,12 +131,10 @@ def test_malformed_or_noncanonical_frames_denied(approved, raw) -> None:
 
 
 def test_untrusted_binding_is_never_accepted(approved) -> None:
-    wrong = VerifiedLocalBinding(
-        DEVICE, "66666666-6666-4666-8666-666666666666", frozenset({"project_summary"})
-    )
+    wrong = bound(project="66666666-6666-4666-8666-666666666666")
     with pytest.raises(LocalReadDeniedError):
         invoke(packet(), (wrong, approved[1]))
-    no_cap = VerifiedLocalBinding(DEVICE, PROJECT, frozenset())
+    no_cap = bound(operations=frozenset())
     with pytest.raises(LocalReadDeniedError):
         invoke(packet(), (no_cap, approved[1]))
 
@@ -203,7 +212,7 @@ def test_committed_real_kicad10_sample_metadata_only() -> None:
     root = Path(__file__).resolve().parents[2]
     folder = root / "tests/fixtures/benchmark_projects/pass_minimal_mcu_board"
     assert (folder / "demo.kicad_pro").is_file()
-    verified = VerifiedLocalBinding(DEVICE, PROJECT, frozenset({"project_summary"}))
+    verified = bound()
     owner_policy = OperatorProject(DEVICE, PROJECT, folder, "demo")
     result = inspect_readonly(
         packet(), verified=verified, operator_project=owner_policy, now_unix_ms=NOW
@@ -220,3 +229,25 @@ def test_invalid_operator_filename_type_fails_closed(approved) -> None:
     bad = OperatorProject(DEVICE, PROJECT, approved[1].directory, ["Example"])
     with pytest.raises(LocalReadDeniedError):
         invoke(packet(), (approved[0], bad))
+
+
+@pytest.mark.parametrize(
+    "verified",
+    [
+        bound(session="bad-session"),
+        bound(expires=NOW),
+        bound(expires=NOW + 300_001),
+        bound(expires=True),
+        bound(expires=NOW + 500),
+    ],
+)
+def test_session_expiration_and_deadline_bounded(approved, verified) -> None:
+    with pytest.raises(LocalReadDeniedError):
+        invoke(packet(), (verified, approved[1]))
+
+
+def test_request_deadline_cannot_outlive_session_lease(approved) -> None:
+    valid = bound(expires=NOW + 500)
+    assert invoke(packet(deadlineUnixMs=NOW + 200), (valid, approved[1]))["files"]["projectPresent"]
+    with pytest.raises(LocalReadDeniedError):
+        invoke(packet(deadlineUnixMs=NOW + 1000), (valid, approved[1]))
