@@ -159,6 +159,34 @@ def test_symlinked_parent_component_denied(approved, tmp_path) -> None:
         invoke(packet(), (approved[0], changed))
 
 
+def test_project_presence_read_resists_directory_swap_after_fd_pin(
+    approved, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from kicad_mcp import cloud_readonly_boundary
+
+    selected = approved[1].directory
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (decoy / "Example.kicad_pcb").write_text("attacker decoy")
+    original_open = cloud_readonly_boundary._open_operator_directory
+
+    def swap_after_open(path: Path) -> int:
+        descriptor = original_open(path)
+        selected.rename(tmp_path / "pinned-project")
+        selected.symlink_to(decoy, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(cloud_readonly_boundary, "_open_operator_directory", swap_after_open)
+    result = invoke(packet(), approved)
+    assert result["files"] == {
+        "projectPresent": True,
+        "boardPresent": True,
+        "schematicPresent": True,
+    }
+    assert "attacker decoy" not in json.dumps(result)
+    assert not any(str(path) in json.dumps(result) for path in (decoy, selected))
+
+
 def test_replaced_file_with_directory_denied(approved) -> None:
     target = approved[1].directory / "Example.kicad_pcb"
     target.unlink()

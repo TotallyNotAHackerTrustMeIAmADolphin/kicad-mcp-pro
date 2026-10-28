@@ -12,7 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
-from kicad_mcp import cloud_pair
+from kicad_mcp import cloud_once, cloud_pair
 from kicad_mcp.cloud_once import LocalApprovalDeniedError, _load_owner_key
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Owner-key persistence needs POSIX")
@@ -144,6 +144,82 @@ def test_owner_key_directory_walk_denies_traversal_and_symlink_ancestors(
         cloud_pair._create_private_key(public_parent / "new.pem")
     assert not (public_parent / "new.pem").exists()
     assert _load_owner_key(keyfile)
+
+
+def test_owner_private_key_read_resists_directory_swap_after_fd_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir(mode=0o700)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir(mode=0o700)
+    approved_key = cloud_pair._create_private_key(trusted / "owner.pem")
+    decoy_key = cloud_pair._create_private_key(decoy / "owner.pem")
+    original_open = cloud_once._open_owner_private_dir
+
+    def swap_after_open(path: Path) -> int:
+        descriptor = original_open(path)
+        trusted.rename(tmp_path / "pinned-trusted")
+        trusted.symlink_to(decoy, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(cloud_once, "_open_owner_private_dir", swap_after_open)
+    loaded = cloud_once._load_owner_key(trusted / "owner.pem")
+    assert loaded.public_key() == approved_key.public_key()
+    assert loaded.public_key() != decoy_key.public_key()
+    assert (tmp_path / "pinned-trusted" / "owner.pem").is_file()
+
+
+def test_owner_private_key_create_resists_directory_swap_after_fd_pin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir(mode=0o700)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir(mode=0o700)
+    original_open = cloud_pair._open_owner_private_dir
+
+    def swap_after_open(path: Path) -> int:
+        descriptor = original_open(path)
+        trusted.rename(tmp_path / "pinned-trusted")
+        trusted.symlink_to(decoy, target_is_directory=True)
+        return descriptor
+
+    monkeypatch.setattr(cloud_pair, "_open_owner_private_dir", swap_after_open)
+    generated = cloud_pair._create_private_key(trusted / "owner.pem")
+    assert (tmp_path / "pinned-trusted" / "owner.pem").is_file()
+    assert not (decoy / "owner.pem").exists()
+    assert (
+        generated.public_key()
+        == _load_owner_key(tmp_path / "pinned-trusted" / "owner.pem").public_key()
+    )
+
+
+def test_owner_key_failed_creation_cleanup_stays_with_pinned_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted = tmp_path / "trusted"
+    trusted.mkdir(mode=0o700)
+    decoy = tmp_path / "decoy"
+    decoy.mkdir(mode=0o700)
+    protected_decoy = decoy / "owner.pem"
+    protected_decoy.write_bytes(b"decoy must never be unlinked")
+    original_sync = cloud_pair.os.fsync
+
+    def swap_and_fail(descriptor: int) -> None:
+        # This injected fault occurs after the key leaf is created and while
+        # cleanup still holds the original parent directory descriptor.
+        assert descriptor >= 0
+        trusted.rename(tmp_path / "pinned-trusted")
+        trusted.symlink_to(decoy, target_is_directory=True)
+        raise OSError("simulated disk sync failure")
+
+    monkeypatch.setattr(cloud_pair.os, "fsync", swap_and_fail)
+    with pytest.raises(cloud_pair.CloudPairingError):
+        cloud_pair._create_private_key(trusted / "owner.pem")
+    monkeypatch.setattr(cloud_pair.os, "fsync", original_sync)
+    assert protected_decoy.read_bytes() == b"decoy must never be unlinked"
+    assert not (tmp_path / "pinned-trusted" / "owner.pem").exists()
 
 
 def test_declined_or_tampered_challenge_never_redeems(
